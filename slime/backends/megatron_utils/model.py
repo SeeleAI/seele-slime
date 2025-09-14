@@ -32,7 +32,8 @@ if torch.version.hip:
 def get_optimizer_param_scheduler(args, optimizer):
     """Build the learning rate scheduler."""
     # Iteration-based training.
-    args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    # args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    args.train_iters = args.num_rollout #因为每轮必然消耗global_batch_size
     if args.lr_decay_iters is None:
         args.lr_decay_iters = args.train_iters
     lr_decay_steps = args.lr_decay_iters * args.global_batch_size

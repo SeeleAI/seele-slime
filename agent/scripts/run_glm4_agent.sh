@@ -24,7 +24,7 @@ fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/glm4-9B.sh"
+source "/root/seele-slime/scripts/models/glm4-9B.sh"
 
 CKPT_ARGS=(
    --hf-checkpoint /root/GLM-Z1-9B-0414/
@@ -35,22 +35,23 @@ CKPT_ARGS=(
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data agent/test/data/train.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
    --rollout-shuffle
-
-   --rm-type deepscaler
-
    --num-rollout 3000
-   --rollout-batch-size 32
+   --expected_steps_per_trajectory 1
+#    --rollout-batch-size 32 不再依赖rollout batch_size
    --n-samples-per-prompt 8
    --rollout-max-response-len 8192
    --rollout-temperature 0.8
-
-   --global-batch-size 256
+   --global-batch-size 32
    --balance-data
+   --use-tis
+   --max-turns 5
+   --filter-zero-advantage true
+   --rollout-function-path agent.gym_rollout.generate_rollout
 )
 
 EVAL_ARGS=(

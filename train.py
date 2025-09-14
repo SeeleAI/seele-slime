@@ -20,7 +20,7 @@ def train(args):
     num_rollout_per_epoch = None
     if args.num_rollout is None:
         num_rollout_per_epoch = ray.get(rollout_manager.controller.get_num_rollout_per_epoch.remote())
-        args.num_rollout = num_rollout_per_epoch * args.num_epoch
+        args.num_rollout = num_rollout_per_epoch * args.num_epoch #只能估算了
     assert args.num_rollout > 0
 
     # sync the initialization (model initalization, load checkpoint, etc.)
@@ -53,7 +53,7 @@ def train(args):
         if args.eval_interval is not None and rollout_id == 0:
             ray.get(rollout_manager.async_eval(rollout_id))
 
-        rollout_data_ref = ray.get(rollout_manager.async_generate(rollout_id))
+        rollout_data_ref = ray.get(rollout_manager.async_generate(rollout_id)) # 这里的rolloutid 是按steps
 
         if args.offload:
             ray.get(rollout_manager.async_offload())

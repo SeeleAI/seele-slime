@@ -37,7 +37,7 @@ class RolloutController:
 
     def get_num_rollout_per_epoch(self):
         assert self.args.rollout_global_dataset
-        return len(self.data_source.dataset) // self.args.rollout_batch_size
+        return len(self.data_source.dataset) // self.args.rollout_batch_size # 总样本除批次大小
 
     def generate(self, rollout_id):
         self.rollout_id = rollout_id
@@ -49,7 +49,9 @@ class RolloutController:
             )["samples"]
             data = [Sample.from_dict(sample) for sample in data]
         else:
-            data = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+
+            
+            data = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False) 
             # flatten the data if it is a list of lists
             while isinstance(data[0], list):
                 data = sum(data, [])

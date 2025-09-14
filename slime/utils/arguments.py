@@ -106,7 +106,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-function-path",
                 type=str,
-                default="slime.rollout.sglang_rollout.generate_rollout",
+                default="slime.rollout.sglang_rollout.generate_rollout", #原来如此
                 help=(
                     "Path to the rollout generation function."
                     "You should use this model to create your own custom rollout function, "
@@ -115,6 +115,30 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "`def generate_rollout(args, rollout_id, *, evaluation=False) -> list[list[Sample]]`"
                     "and within the output sample, you should at least set `tokens`, `response_length`, `reward` "
                     "and `truncated`."
+                ),
+            )
+            parser.add_argument(
+                "--expected_steps_per_trajectory",
+                type=int,
+                default=1, 
+                help=(
+                    ""
+                ),
+            )
+            parser.add_argument(
+                "--max-turns",
+                type=int,
+                default=1, #原来如此
+                help=(
+                    "最大gym交互轮数"
+                ),
+            )
+            parser.add_argument(
+                "--filter-zero-advantage",
+                type=str,
+                default=False, #原来如此
+                help=(
+                    "dynamic sample"
                 ),
             )
             parser.add_argument(
@@ -365,7 +389,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-batch-size",
                 type=int,
-                required=True,
+                required=False,
                 help=(
                     "The number of prompts in each rollout step. "
                     "The total data returned should be rollout_batch_size * n_samples_per_prompt. "
@@ -1006,22 +1030,22 @@ def parse_args(add_custom_arguments=None):
             )
         args.global_batch_size = global_batch_size
 
-    assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
-        f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
-        f"is not a multiple of global_batch_size {args.global_batch_size}"
-    )
+    # assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
+    #     f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+    #     f"is not a multiple of global_batch_size {args.global_batch_size}"
+    # )
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False
         print("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
 
-    if args.over_sampling_batch_size is None:
-        args.over_sampling_batch_size = args.rollout_batch_size
+    # if args.over_sampling_batch_size is None:
+    #     args.over_sampling_batch_size = args.rollout_batch_size
 
-    assert args.over_sampling_batch_size >= args.rollout_batch_size, (
-        f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
-        f"rollout_batch_size {args.rollout_batch_size}"
-    )
+    # assert args.over_sampling_batch_size >= args.rollout_batch_size, (
+    #     f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
+    #     f"rollout_batch_size {args.rollout_batch_size}"
+    # )
 
     if args.num_epoch is not None:
         if args.num_rollout is not None:

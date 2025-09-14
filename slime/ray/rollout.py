@@ -7,7 +7,8 @@ import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from slime.backends.sglang_utils.sglang_engine import SGLangEngine
-from slime.ray.buffer import RolloutController
+# from slime.ray.buffer import RolloutController
+from agent.gym_rollout_controller import GymRolloutController
 from slime.utils.http_utils import find_available_port, get_host_info, run_router
 
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -156,7 +157,7 @@ class RolloutManager:
     def __init__(self, args, pg, wandb_run_id):
         self.args = args
         _start_router(args)
-        self.controller = RolloutController.options(
+        self.controller = GymRolloutController.options(
             num_cpus=1,
             num_gpus=0,
         ).remote(args, wandb_run_id=wandb_run_id)

@@ -133,7 +133,7 @@ class RolloutDataSourceWithBuffer(RolloutDataSource):
 
     def get_samples(self, num_samples: int) -> list[list[Sample]]:
         """
-        Return num_samples samples
+        Return num_samples samples，partially rollout
         """
 
         samples = self._get_samples_from_buffer(num_samples)

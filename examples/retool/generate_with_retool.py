@@ -265,7 +265,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
             return sample
 
         cur_response = output["text"]
-        cur_response = postprocess_responses(cur_response)
+        cur_response = postprocess_responses(cur_response) #感觉special token没处理对
 
         # Record current response tokens
         cur_response_token_ids = state.tokenizer(cur_response, add_special_tokens=False)["input_ids"]
