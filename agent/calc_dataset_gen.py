@@ -103,7 +103,7 @@ class DatasetGenerator:
         """生成训练和测试数据集"""
         
         def create_sample(expression: str, answer: int, split: str, index: int) -> dict:
-            question = f"计算下列表达式的值：{expression}"
+            question = f"Calculate the following expression: {expression}"
             prompt_content = f"{question} Let's think step by step and output the final answer after \"####\"."
             
             return {

@@ -45,10 +45,6 @@ def filter_uniform_reward_groups(samples: List[Sample]) -> List[Sample]:
 
 
 class GymRolloutDataSource(RolloutDataSourceWithBuffer):
-    """
-    支持gym环境的数据源，处理trajectory->steps的转换
-    """
-    
     def __init__(self, args):
         super().__init__(args)
         # 专门存储生成的steps

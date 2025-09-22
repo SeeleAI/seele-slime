@@ -1,17 +1,163 @@
 import asyncio
 import copy
 import time
+import torch
 from typing import List
 import uuid
 from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.http_utils import post
-from slime.utils.types import Sample
+from agent.base.protocal import Sample
 from slime.utils.async_utils import run
 from tqdm import tqdm
 from agent.base.env import Env
 from agent.utils import get_env
+from agent.gym_rollout_datasource import GymRolloutDataSource
 
 __all__ = ["generate_rollout"]
+
+
+def remove_eos_token(tokenizer, txt):
+    return txt.replace(tokenizer.eos_token, "")
+
+def get_remaining_tokens(memory, current_length):
+    return max(0, memory - current_length)
+
+async def agent_loop_generate(
+    args,
+    sample: Sample,
+    trajectory_id: str,
+    prompt_group_id: str,
+    sampling_params: dict
+) -> List[Sample]:
+    assert not args.partial_rollout, "Partial rollout is not supported for this function at the moment."
+    max_turns = getattr(args, 'max_turns', 10)
+    max_len = getattr(args, 'rollout_max_response_len', 4096)
+    virtual_memory = 2048
+
+    state = GenerateState(args)
+    url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    
+    env: Env = get_env(sample.metadata)
+    
+    # get the initial messages (sys prompt and question)
+    sample.messages = await env.reset()
+    input_token_len = len(state.tokenizer.apply_chat_template(sample.messages, add_generation_prompt=True, tokenize=True))
+    sample.messages[1]["content"] += f" Remaining tokens: {get_remaining_tokens(virtual_memory, input_token_len)}"
+    
+    current_prompt = state.tokenizer.apply_chat_template(
+            sample.messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+    # current_prompt_ids = state.tokenizer(current_prompt, add_special_tokens=False)["input_ids"]
+    # tool_call_count = 0  # Track actual tool call rounds
+    
+    sample.rollout_log_probs = []
+    sample.assistant_tokens = []
+    
+    # maybe record the extra sample when swap out happens
+    all_samples = []
+    reward = 0.0
+    for turn in range(max_turns):
+        # 1. Post generate request to SGLang
+        payload = {
+            "text": current_prompt,
+            "sampling_params": sampling_params,
+            "return_logprob": True
+        }
+        output = await post(url, payload, use_http2=args.use_http2)
+        # Handle abort
+        if output["meta_info"]["finish_reason"]["type"] == "abort":
+            sample.status = Sample.Status.ABORTED
+            break
+        
+        # Handle truncation
+        if output["meta_info"]["finish_reason"]["type"] == "length":
+            sample.status = Sample.Status.TRUNCATED
+            break
+        
+        # 2. collect text, logprobs
+        cur_response = output["text"]
+        # manage logprobs at turn level
+        sample.rollout_log_probs.append([item[0] for item in output["meta_info"]["output_token_logprobs"]])
+        sample.assistant_tokens.append([item[1] for item in output["meta_info"]["output_token_logprobs"]])
+        
+        # 3. interact with enviroment
+        # Lynx: here we remove the EOS token, because tokenizer.apply_chat_template will add an EOS token
+        # However, we should let the SGLang return the EOS token, because we need log prob of EOS token
+        sample.messages.append({"role": "assistant", "content": remove_eos_token(state.tokenizer, cur_response)})
+        step_result = await env.step(sample.messages)
+        
+        if step_result.reward is not None:
+            reward += step_result.reward
+            
+        if step_result.done:
+            sample.status = Sample.Status.COMPLETED
+            sample.metadata = {
+                "trajectory_id": trajectory_id,
+                "prompt_group_id": prompt_group_id,
+                "turn_number": turn,
+                "env_config": sample.metadata.get("env_name"),
+            }
+            all_samples.append(sample)
+            break
+            
+        # swap out happend
+        if step_result.modified_context:
+            # In this case, we need to save the previous messages as a
+            # new sample, and continue the interaction with modified context
+            original_sample = copy.deepcopy(sample)
+            original_sample.metadata = {
+                "trajectory_id": trajectory_id,  # belongs to the same trajectory
+                "prompt_group_id": prompt_group_id,
+                "turn_number": turn,
+                "env_config": sample.metadata.get("env_name"),
+            }
+            all_samples.append(original_sample)
+        
+        sample.messages = step_result.next_observation
+        next_input_length = len(state.tokenizer.apply_chat_template(sample.messages, add_generation_prompt=True, tokenize=True))
+        if next_input_length > max_len:
+            sample.status = Sample.Status.TRUNCATED
+            break
+        
+        if sample.messages[-1]["role"] == "assistant":
+            sample.messages.append({"role": "user", "content": f"Remaining tokens: {get_remaining_tokens(virtual_memory, next_input_length)}"})
+        else:
+            sample.messages[-1]["content"] += f"\nRemaining tokens: {get_remaining_tokens(virtual_memory, next_input_length)}"
+        
+        # 4. update to next observation
+        current_prompt = state.tokenizer.apply_chat_template(
+            sample.messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        
+    # no sample generated due to abort or truncate
+    if not all_samples:
+        empty_sample = Sample(
+            index=sample.index,
+            prompt=sample.prompt,
+            messages=[],
+            tokens=[],
+            response="",
+            response_length=0,
+            reward=0.0,
+            status=Sample.Status.ABORTED,
+            metadata={
+                "trajectory_id": trajectory_id,
+                "prompt_group_id": prompt_group_id,
+                "error": "No samples generated",
+            }
+        )
+        all_samples.append(empty_sample)
+        
+    # in case swap out happened, we assign identical reward to all samples
+    for sample in all_samples:
+        sample.reward = reward
+        
+    return all_samples
+    
 
 
 async def generate_trajectory_as_samples(
@@ -36,17 +182,17 @@ async def generate_trajectory_as_samples(
     
     # Reset environment获取初始messages
     messages = await env.reset()
-    empty_system_tokens_index = len(state.tokenizer.apply_chat_template(
-        [{"role": "system", "content": ""}],
-        add_generation_prompt=False,
-        tokenize=False,
-    ))
+    # empty_system_tokens_index = len(state.tokenizer.apply_chat_template(
+    #     [{"role": "system", "content": ""}],
+    #     add_generation_prompt=False,
+    #     tokenize=False,
+    # ))
     # 生成的samples列表
     samples = []
     
     # 配置参数
     max_turns = getattr(args, 'max_turns', 10)
-    max_len = getattr(args, 'rollout_max_response-len', 4096)
+    max_len = getattr(args, 'rollout_max_response_len', 4096)
     
     # 跟踪时间
     generation_time = 0.0
@@ -71,6 +217,7 @@ async def generate_trajectory_as_samples(
             messages,
             add_generation_prompt=True,
             tokenize=False,
+            enable_thinking=False
         )
         current_prompt_ids = state.tokenizer(current_prompt, add_special_tokens=False)["input_ids"] #只支持non-think model
         
@@ -81,6 +228,12 @@ async def generate_trajectory_as_samples(
         
         # 2. Generate response
         gen_start = time.time()
+        # current_prompt = state.tokenizer.apply_chat_template(
+        #     [{"role": "system", "content": "You are a helpful assistant."}, {"role": "user", "content": "Hello! Who are you?"}],
+        #     add_generation_prompt=True,
+        #     tokenize=False,
+        #     enable_thinking=False
+        # )
         payload = {
             "text": current_prompt,
             "sampling_params": sampling_params,
@@ -93,7 +246,6 @@ async def generate_trajectory_as_samples(
             print(f"Generation failed: {e}")
             done = True
             break
-
         generation_time += time.time() - gen_start
         
         # 检查abort
@@ -114,27 +266,30 @@ async def generate_trajectory_as_samples(
         step_loss_masks.extend([1] * len(assistant_token_ids))  # assistant tokens标记为1
         
         # 4. 更新messages
-        messages.append({"role": "assistant", "content": assistant_response})
+        messages.append({"role": "assistant", "content": remove_eos_token(state.tokenizer, assistant_response)})
         
         # 5. Environment step
+        #<im_start>system<im_end><im_start>user<im_end>...<im_start>assistant<im_end>
         tool_start = time.time()
         step_result = await env.step(messages)
         tool_time += time.time() - tool_start
         pre_msg = state.tokenizer.apply_chat_template(
             messages,
-            add_generation_prompt=True,
+            add_generation_prompt=False,
             tokenize=False,
+            enable_thinking=False,
         )
         pre_inpudt_ids = state.tokenizer(pre_msg, add_special_tokens=False)["input_ids"]
         all_content = state.tokenizer.apply_chat_template(
             step_result.next_observation,
-            add_generation_prompt=True,
+            add_generation_prompt=False,
             tokenize=False,
+            enable_thinking=False,
         )
-
+        
         all_ids = state.tokenizer(all_content, add_special_tokens=False)["input_ids"]
-        user_content_ids = all_ids[len(pre_inpudt_ids):]
-        user_content = state.tokenizer.decode(user_content_ids)
+        user_content_ids = all_ids[len(pre_inpudt_ids):] #仅适用non-thinking model
+        user_content = state.tokenizer.decode(user_content_ids)  # 
         # 累积奖励
         if step_result.reward is not None:
             trajectory_reward += step_result.reward
@@ -176,7 +331,13 @@ async def generate_trajectory_as_samples(
             
             samples.append(step_sample)
             step_number += 1
-            
+            #query promptids
+            # response
+            #tool_call 1
+            #tool_result 0
+            # user compress
+            #too_call 1 #modified_context  user compress
+
             # 如果context被修改，开始新的step
             if step_result.modified_context and not step_result.done: #如果修改了context并且还没有完成，则把修改后的所有上下文作为prompt_ids
                 step_prompt_text = state.tokenizer(step_result.next_observation,add_generation_prompt=True,tokenize=False)
@@ -207,7 +368,7 @@ async def generate_trajectory_as_samples(
     
     # 关闭环境
     await env.close()
-    
+
     # 更新所有samples的最终信息
     for sample in samples:
         sample.reward = trajectory_reward  # 确保所有steps使用相同的trajectory reward
@@ -239,57 +400,217 @@ async def generate_trajectory_as_samples(
 
 
 
-async def generate_rollout_async(args, rollout_id: int, data_source) -> List[Sample]:
-    """
-    异步生成rollout数据，返回List[Sample]
-    """
-    state = GenerateState(args)
-    target_size = args.global_batch_size
-    # 持续生成直到step_buffer有足够数据
-    while data_source.get_step_buffer_length() < target_size:
-        # 获取原始prompt数据
-        prompt_groups = data_source.get_samples(1)
-        if not prompt_groups:
-            print("No more prompts available")
-            break
+# async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
+#     """
+#     异步生成rollout数据，返回List[Sample]
+#     """
+#     state = GenerateState(args)
+#     target_size = args.global_batch_size
+#     # 持续生成直到step_buffer有足够数据
+#     while data_source.get_step_buffer_length() < target_size:
+#         # get just one sample, but this sample is repeated for n_samples_per_prompt times
+#         # for group generation. Note that, the original buffer in SLIME is useless.
+#         prompt_groups = data_source.get_samples(1)
+#         if not prompt_groups:
+#             print("No more prompts available")
+#             break
         
-        prompt_group = prompt_groups[0]  # [Sample1, Sample2, ...] (n_samples_per_prompt个)
+#         prompt_group = prompt_groups[0]  # [Sample1, Sample2, ...] (n_samples_per_prompt个)
         
+#         # 为这个prompt group生成一个唯一ID
+#         prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
+        
+#         # Note that this loop submits only one group
+#         tasks = []
+#         for i, prompt_sample in enumerate(prompt_group):
+#             trajectory_id = f"{prompt_group_id}_traj_{i}"
+            
+#             # task = generate_trajectory_as_samples(
+#             #     args,
+#             #     prompt_sample,
+#             #     trajectory_id=trajectory_id,
+#             #     prompt_group_id=prompt_group_id,
+#             #     sampling_params=state.sampling_params.copy()
+#             # )
+#             task = agent_loop_generate(
+#                 args,
+#                 prompt_sample,
+#                 trajectory_id=trajectory_id,
+#                 prompt_group_id=prompt_group_id,
+#                 sampling_params=state.sampling_params.copy()
+#             )
+#             tasks.append(task)
+        
+#         # 等待所有trajectories完成
+#         trajectory_results = await asyncio.gather(*tasks)
+#         # trajectory_results: List[List[Sample]], one group in GRPO
+#         # The first List is N trajectories, the second List represents
+#         # possible swap out
+#         breakpoint()
+#         # Compute group advantage right here
+#         advs = compute_group_advantages(trajectory_results, args)
+#         for samples, adv in zip(trajectory_results, advs):
+#             for samp in samples:
+#                 samp.advantage = adv
+        
+#         # flatten all trajectories
+#         all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
+        
+#         # 将生成的steps放入buffer
+#         if all_steps:
+#             data_source.add_steps_to_buffer(all_steps)
+        
+#         print(f"Generated {len(all_steps)} steps from {len(prompt_group)} trajectories, "
+#               f"buffer size: {data_source.get_step_buffer_length()}")
+    
+#     # 从buffer取出需要的数量
+#     return data_source.get_steps_from_buffer(target_size) #需要改成分布式队列
+
+
+class TrajectoryProducer:
+    """
+    轨迹生产者 - 持续生成trajectories并放入队列
+    
+    负责从数据源获取prompt groups，生成trajectories，并将结果放入异步队列。
+    生产者独立运行，不需要等待消费者处理完成，实现真正的异步解耦。
+    """
+    
+    def __init__(self, args, data_source: GymRolloutDataSource, trajectory_queue: asyncio.Queue, stop_event: asyncio.Event):
+        self.args = args
+        self.data_source = data_source
+        self.trajectory_queue = trajectory_queue
+        self.stop_event = stop_event
+        self.state = GenerateState(args)
+        self.produced_count = 0
+        
+    async def run(self):
+        """持续运行的生产者循环"""
+        print("TrajectoryProducer started")
+        
+        while not self.stop_event.is_set():
+            try:
+                # 获取prompt groups
+                prompt_groups = self.data_source.get_samples(1)
+                if not prompt_groups:
+                    await asyncio.sleep(0.1)  # 没有数据时短暂等待
+                    continue
+                
+                prompt_group = prompt_groups[0]
+                
+                # 生成trajectories
+                trajectory_results = await self._generate_trajectories(prompt_group)
+                
+                # 放入队列（带超时，避免阻塞）
+                try:
+                    await asyncio.wait_for(
+                        self.trajectory_queue.put(trajectory_results), 
+                        timeout=1.0
+                    )
+                    self.produced_count += len(trajectory_results)
+                    print(f"Producer: Generated {len(trajectory_results)} trajectories, total: {self.produced_count}")
+                except asyncio.TimeoutError:
+                    # 队列满时跳过，避免阻塞
+                    print("Producer: Queue full, skipping batch")
+                    continue
+                    
+            except Exception as e:
+                print(f"Producer error: {e}")
+                await asyncio.sleep(1.0)  # 错误时等待更长时间
+        
+        print("TrajectoryProducer stopped")
+    
+    async def _generate_trajectories(self, prompt_group):
+        """生成一个prompt group的所有trajectories"""
         # 为这个prompt group生成一个唯一ID
-        prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
+        prompt_group_id = f"group_{uuid.uuid4().hex[:8]}"
         
-        # 为这组prompts生成trajectories
+        # 为每个prompt样本创建trajectory生成任务
         tasks = []
         for i, prompt_sample in enumerate(prompt_group):
             trajectory_id = f"{prompt_group_id}_traj_{i}"
-            
             task = generate_trajectory_as_samples(
-                args,
+                self.args,
                 prompt_sample,
                 trajectory_id=trajectory_id,
                 prompt_group_id=prompt_group_id,
-                sampling_params=state.sampling_params.copy()
+                sampling_params=self.state.sampling_params.copy()
             )
             tasks.append(task)
         
-        # 等待所有trajectories完成
+        # 并发生成所有trajectories
         trajectory_results = await asyncio.gather(*tasks)
         
-        # 收集所有steps（不在这里计算advantages）
-        all_steps = []
-        for trajectory_steps in trajectory_results:
-            all_steps.extend(trajectory_steps)
+        # 计算advantages
+        advs = compute_group_advantages(trajectory_results, self.args)
+        for samples, adv in zip(trajectory_results, advs):
+            for samp in samples:
+                samp.advantage = adv
         
-        # 将生成的steps放入buffer
-        if all_steps:
-            data_source.add_steps_to_buffer(all_steps)
-        
-        print(f"Generated {len(all_steps)} steps from {len(prompt_group)} trajectories, "
-              f"buffer size: {data_source.get_step_buffer_length()}")
-    
-    # 从buffer取出需要的数量
-    return data_source.get_steps_from_buffer(target_size)
+        return trajectory_results
 
+async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
+    """
+    新的实现将生产者和消费者分离为独立的异步任务：
+    - 生产者：持续从数据源获取prompts并生成trajectories，放入异步队列
+    - 消费者：从队列取出trajectories，处理后放入buffer，直到达到目标数量
+    """
+    target_size = args.global_batch_size
+    
+    # 创建异步队列用于生产者-消费者通信
+    # 队列大小限制避免内存过度使用
+    queue_size = getattr(args, 'trajectory_queue_size', 10)
+    trajectory_queue = asyncio.Queue(maxsize=queue_size)
+    stop_event = asyncio.Event()
+    
+    # 创建生产者和消费者
+    producer = TrajectoryProducer(args, data_source, trajectory_queue, stop_event)
+    consumer = TrajectoryConsumer(args, data_source, trajectory_queue, stop_event)
+    
+    # 启动生产者任务（后台运行）
+    producer_task = asyncio.create_task(producer.run())
+    
+    try:
+        # 启动消费者任务并等待完成
+        result = await consumer.run_until_target(target_size)
+        return result
+    finally:
+        # 优雅停止生产者
+        stop_event.set()
+        producer_task.cancel()
+        try:
+            await producer_task
+        except asyncio.CancelledError:
+            pass
+        
+        print(f"Rollout {rollout_id} completed: Producer generated {producer.produced_count} trajectories, "
+              f"Consumer processed {consumer.consumed_count} steps")
+
+
+
+def compute_group_advantages(
+    samples: List[List[Sample]],
+    args
+):
+    """Calculates only one group of advantages"""
+    # Although swap out gives us more samples, they have identical rewards
+    # and we only need one of them as representative.
+    raw_rewards = [sample[0].reward for sample in samples]
+    if (
+        args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
+        and args.rewards_normalization
+    ):
+        # group norm
+        rewards = torch.tensor(raw_rewards, dtype=torch.float)
+        mean = rewards.mean()  # calculate group mean
+        rewards = rewards - mean  # remove bias as in GRPO
+
+        if args.advantage_estimator in ["grpo", "gspo"] and args.grpo_std_normalization:
+            std = rewards.std()  # calculate group std
+            rewards = rewards / (std + 1e-6)  # remove variance and avoid zero division
+
+        return rewards.flatten().tolist()
+
+    return raw_rewards
 
 def compute_prompt_group_advantages(
     trajectory_samples_by_prompt: List[List[Sample]], 
@@ -340,7 +661,7 @@ def compute_prompt_group_advantages(
     return all_steps
 
 
-def generate_rollout(args, rollout_id, data_source, evaluation=False):
+def generate_rollout(args, rollout_id, data_source: GymRolloutDataSource, evaluation=False):
     """
     生成rollout数据的入口函数，保持原有接口
     
@@ -501,3 +822,10 @@ async def eval_rollout_single_dataset(args, rollout_id, name, path):
     print(f"Eval {name} results: avg_reward={avg_reward:.4f}, avg_steps={avg_steps:.2f}, done_ratio={done_ratio:.2f}")
     
     return results
+
+
+# sanity check
+if __name__ == "__main__":
+    pass
+
+

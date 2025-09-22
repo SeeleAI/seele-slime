@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Union
 import uuid
+from enum import Enum
 
 Message = Dict[str, Union[str, List[Dict[str, Any]], List[int], None]]
 Messages = List[Message]
@@ -41,3 +42,57 @@ class Trajectory:
     def total_reward(self) -> float:
         return sum(step.reward for step in self.steps)
 
+
+@dataclass
+class Sample:
+    """The sample generated"""
+
+    index: Optional[int] = None
+    # prompt
+    prompt: Union[str, list[dict[str, str]]] = ""
+    assistant_tokens: list[int] = field(default_factory=list)
+    # single turn response
+    tokens: list[int] = field(default_factory=list)
+    response: str = ""
+    response_length: int = 0
+    label: Optional[str] = None
+    reward: Optional[Union[float, dict[str, Any]]] = None
+    advantage: Optional[float] = None
+    loss_mask: Optional[list[int]] = None
+    weight_versions: list[str] = field(default_factory=list)
+    rollout_log_probs: Optional[list[float]] = None  # Log probabilities from rollout engine
+    # multi-turn messages
+    messages: Messages = field(default_factory=list)
+    end_of_turn: bool = False
+
+    class Status(Enum):
+        PENDING = "pending"   # 正在生成中
+        COMPLETED = "completed"  # 完成
+        TRUNCATED = "truncated"  # 超出max length被截断
+        ABORTED = "aborted"  # 被打断
+
+    status: Status = Status.PENDING
+    metadata: dict = field(default_factory=dict)
+    # metadata used during training, e.g., what loss to use for this sample.
+    train_metadata: Optional[dict] = None
+
+    def to_dict(self):
+        value = self.__dict__.copy()
+        value["status"] = self.status.value
+        return value
+
+    @staticmethod
+    def from_dict(data: dict):
+        data["status"] = Sample.Status(data["status"])
+        return Sample(**data)
+
+    def get_reward_value(self, args) -> float:
+        """return reward if args.reward_key is not specified, otherwise return reward[args.reward_key]
+
+        Args:
+            args (_type_): _description_
+
+        Returns:
+            float: reward value
+        """
+        return self.reward if not args.reward_key else self.reward[args.reward_key]

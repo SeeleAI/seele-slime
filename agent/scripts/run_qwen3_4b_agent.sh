@@ -24,36 +24,39 @@ fi
 echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
-source "${SCRIPT_DIR}/models/qwen3-4B.sh"
+source "/root/seele-slime/scripts/models/qwen3-4B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint Qwen/Qwen3-4B-Instruct-2507
-   #--hf-checkpoint /root/Qwen3-4B-FP8
-   --ref-load /root/Qwen3-4B_torch_dist
-   --load /root/Qwen3-4B_slime/
-   --save /root/Qwen3-4B_slime/
+   --hf-checkpoint /root/qwen3-4b-agent/qwen3-4b
+   --ref-load /root/qwen3-4b-agent/qwen3-4b_torch_dist
+   --load /root/qwen3-4b-agent/qwen3-4b_slime/
+   --save /root/qwen3-4b-agent/qwen3-4b_slime/
    --save-interval 20
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --prompt-data agent/test/data/train.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
    --rollout-shuffle
-   --rm-type deepscaler
    --num-rollout 3000
-   --rollout-batch-size 32
+   --expected_steps_per_trajectory 1
+#    --rollout-batch-size 32 不再依赖rollout batch_size
    --n-samples-per-prompt 8
-   --rollout-max-response-len 8192
+   --rollout-max-response-len 2100
    --rollout-temperature 0.8
-
-   --global-batch-size 256
+   --global-batch-size 32
    --balance-data
+   --use-tis
+   --max-turns 5
+   --filter-zero-advantage true
+   --rollout-function-path agent.gym_rollout.generate_rollout
+   # --rollout_skip_special_tokens true
 )
 
 EVAL_ARGS=(
-   --eval-interval 20
+   # --eval-interval 20
    --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
    --n-samples-per-eval-prompt 16
    --eval-max-response-len 16384
@@ -64,7 +67,7 @@ PERF_ARGS=(
    --tensor-model-parallel-size 2
    --sequence-parallel
    --pipeline-model-parallel-size 1
-   --context-parallel-size 1
+   --context-parallel-size 2
    --expert-model-parallel-size 1
    --expert-tensor-parallel-size 1
 
@@ -74,7 +77,7 @@ PERF_ARGS=(
 
    # --micro-batch-size 1
    --use-dynamic-batch-size
-   --max-tokens-per-gpu 9216
+   --max-tokens-per-gpu 4608
 )
 
 GRPO_ARGS=(
@@ -97,7 +100,7 @@ OPTIMIZER_ARGS=(
 )
 
 WANDB_ARGS=(
-   # --use-wandb
+   #--use-wandb
    # --wandb-project slime-dev
    # --wandb-group qwen3-4B-test
    # --wandb-key ${WANDB_KEY}
@@ -105,7 +108,6 @@ WANDB_ARGS=(
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 2
-   --sglang-mem-fraction-static 0.7
 )
 
 MISC_ARGS=(
@@ -128,7 +130,8 @@ RUNTIME_ENV_JSON="{
   \"env_vars\": {
     \"PYTHONPATH\": \"/root/Megatron-LM/\",
     \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
-    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
+    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\",
+    \"RAY_DEBUG\": \"1\"
   }
 }"
 
@@ -136,8 +139,8 @@ ray job submit --address="http://127.0.0.1:8265" \
    --runtime-env-json="${RUNTIME_ENV_JSON}" \
    -- python3 train.py \
    --actor-num-nodes 1 \
-   --actor-num-gpus-per-node 8 \
-   --colocate \
+   --actor-num-gpus-per-node 4 \
+   --rollout-num-gpus 4 \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \

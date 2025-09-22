@@ -1038,9 +1038,10 @@ def parse_args(add_custom_arguments=None):
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False
         print("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
-
-    # if args.over_sampling_batch_size is None:
-    #     args.over_sampling_batch_size = args.rollout_batch_size
+        
+    # Lynx: temporally use the original logic
+    if args.over_sampling_batch_size is None:
+        args.over_sampling_batch_size = args.rollout_batch_size
 
     # assert args.over_sampling_batch_size >= args.rollout_batch_size, (
     #     f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "

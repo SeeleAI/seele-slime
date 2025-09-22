@@ -58,6 +58,7 @@ class GymRolloutController:
         self.generate_rollout = load_function(self.args.rollout_function_path) #改成gym_rollout.generate_rollout
         self.eval_generate_rollout = load_function(self.args.eval_function_path) #改成gym_rollout.generate_rollout
          
+        # default is: slime.rollout.sglang_rollout.generate_rollout
         print(f"import {self.args.rollout_function_path} as generate_rollout function.")
         print(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
@@ -174,6 +175,17 @@ class GymRolloutController:
                         trajectory_rewards[traj_id] = sample.reward
                 
                 # 转换为tensor计算advantages
+                # [user,assistant,tool_result,tool_call,user,assistant,...]
+                # [0,1,0,1,0,1]
+                # S0,A0 user,assistant
+                # S1,A1 (user,assistant,tool_result)  tool_call
+                # （(user,assistant,tool_result),tool_call)
+                # S,A,adv,log_probs
+                # aa bb (S0,A0)
+                # aa,bb,cc dd (S1,A1) messages
+                # ee,ff(S2,A2)
+                # ee,ff,gg hh(S3,A3) messages
+                # [(S0,A0),(S1,A1),(S2,A2),(S3,A3)]1 t1 t20 t3
                 unique_rewards = list(trajectory_rewards.values())
                 if len(unique_rewards) > 1:
                     rewards_tensor = torch.tensor(unique_rewards, dtype=torch.float32)

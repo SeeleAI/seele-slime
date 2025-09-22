@@ -3,132 +3,30 @@ import re
 from typing import Dict, Any
 from agent.base.protocal import Messages, StepResult
 from agent.base.env import Env
+from agent.tools.schema import TestMathToolsSchema, register_tool_schema, register_tool_executor, MemoryToolsSchema
+from agent.constant import TEST_MATH_SYS_PROMPT
+from agent.tools.test_math_tools import TestMathTools
+from agent.tools.memory_tools import MemoryTools
+
 
 class CalcEnv(Env):
-    """数学运算环境"""
-    
-    def __init__(self, env_config):
+    """A test environment for calculating math problems.
+
+    Args:
+        env_config (dict): configuration for the environment.
+    """
+    def __init__(self, env_config: dict):
         self.question = env_config.get("question")
         self.current_answer = env_config.get("answer")
         self.conversation_history = []
         
         # 定义四个运算工具（不透露具体规则）
-        self.tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "star_operation",
-                    "description": "执行星星运算（☆），输入两个整数，返回运算结果",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "a": {
-                                "type": "integer",
-                                "description": "第一个操作数"
-                            },
-                            "b": {
-                                "type": "integer", 
-                                "description": "第二个操作数"
-                            }
-                        },
-                        "required": ["a", "b"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "flower_operation",
-                    "description": "执行花朵运算（❀），输入两个整数，返回运算结果",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "a": {
-                                "type": "integer",
-                                "description": "第一个操作数"
-                            },
-                            "b": {
-                                "type": "integer",
-                                "description": "第二个操作数"
-                            }
-                        },
-                        "required": ["a", "b"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "moon_operation", 
-                    "description": "执行月亮运算（☽），输入两个整数，返回运算结果",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "a": {
-                                "type": "integer",
-                                "description": "第一个操作数"
-                            },
-                            "b": {
-                                "type": "integer",
-                                "description": "第二个操作数"
-                            }
-                        },
-                        "required": ["a", "b"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "sun_operation",
-                    "description": "执行太阳运算（☀），输入两个整数，返回运算结果", 
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "a": {
-                                "type": "integer",
-                                "description": "第一个操作数"
-                            },
-                            "b": {
-                                "type": "integer",
-                                "description": "第二个操作数"
-                            }
-                        },
-                        "required": ["a", "b"]
-                    }
-                }
-            }
-        ]
+        self.tool_schema = register_tool_schema("all", TestMathToolsSchema(), MemoryToolsSchema())
+        self.tools = register_tool_executor(TestMathTools(avaialble_tools="all"), MemoryTools(avaialble_tools="all"))
         
         # 系统提示词（不透露运算规则）
-        self.system_prompt = """你是一个数学计算助手，需要帮助解决包含特殊运算符的数学表达式。
-
-你有以下四种特殊运算工具可以使用：
-{{tools}}
-
-工具调用格式：
-```
-<tool_call>
-{"name": "工具名称", "arguments": {"a": 数字1, "b": 数字2}}
-</tool_call>
-```
-
-示例：
-用户：计算 5 ☆ 3 ❀ 2
-助手：我需要逐步计算。首先计算 5 ☆ 3：
-<tool_call>
-{"name": "star_operation", "arguments": {"a": 5, "b": 3}}
-</tool_call>
-
-（工具返回结果后继续下一步计算）
-计算规则：
-- 表达式从左到右依次计算
-- **每轮对话只能调用一个工具，否则直接失败**
-- 需要逐步计算每个运算
-- 最终答案请放在<answer>数字</answer>标签中
-"""
-        self.system_prompt = self.system_prompt.replace("{{tools}}", json.dumps(self.tools, indent=2,ensure_ascii=False))
-
+        self.system_prompt = TEST_MATH_SYS_PROMPT.replace("{{tools}}", json.dumps(self.tool_schema, indent=2,ensure_ascii=False))
+        
     async def reset(self) -> Messages:
         """重置环境到初始状态"""
         self._current_step = 0
@@ -148,7 +46,18 @@ class CalcEnv(Env):
 
 
     async def step(self, action: Messages) -> StepResult:
-        """执行一步"""
+        """Parse and reward message from agent.
+
+        Args:
+            action (Messages): Total messages from agent.
+
+        Returns:
+            StepResult: Result of the current step, with the following fields:
+                - next_observation: The next observation from the environment.
+                - reward: The reward for the current step.
+                - done: Whether the episode has ended.
+                - modified_context: Whether the context was modified during the step.
+        """
         self._current_step += 1
         
         # 获取最新的助手消息
@@ -189,35 +98,45 @@ class CalcEnv(Env):
                 arguments = tool_call_data["arguments"]
                 
                 # 验证工具名称
-                valid_tools = ["star_operation", "flower_operation", "moon_operation", "sun_operation"]
+                valid_tools = ["star_operation", "flower_operation", "moon_operation", "sun_operation", "summarize"]
                 if function_name not in valid_tools:
+                    print(f"[step] Invalid tool name: {function_name}")
                     return StepResult(
-                        next_observation=updated_messages,
+                        next_observation=action,
                         reward=0.0,
                         done=True,
                         modified_context=False
                     )
                 
                 # 执行工具函数
-                result = self._execute_tool(function_name, arguments)
+                if function_name != "summarize":
+                    result = self._execute_tool(function_name, arguments)
+                    
+                    # 构建工具响应消息
+                    tool_response = {
+                        "role": "user",
+                        "content": f"Tool {function_name} Result: {result}"
+                    }
+                    updated_messages = action + [tool_response]
+                    return StepResult(
+                        next_observation=updated_messages,
+                        reward=0.0,
+                        done=False,
+                        modified_context=False
+                    )
+                else:
+                    arguments["messages"] = action
+                    updated_messages = self._execute_tool(function_name, arguments)
                 
-                # 构建工具响应消息
-                tool_response = {
-                    "role": "user",
-                    "content": f"工具 {function_name} 执行结果：{result}"
-                }
-                
-                # 添加到对话历史
-                updated_messages = action + [tool_response]
-                
-                return StepResult(
-                    next_observation=updated_messages,
-                    reward=0.0,
-                    done=False,
-                    modified_context=False
-                )
+                    return StepResult(
+                        next_observation=updated_messages,
+                        reward=0.0,
+                        done=False,
+                        modified_context=True
+                    )
                 
             except Exception as e:
+                print(f"[step] Failed to parse tool call: {e}")
                 return StepResult(
                     next_observation=action,
                     reward=0.0,
@@ -229,25 +148,25 @@ class CalcEnv(Env):
         return StepResult(
             next_observation=action,
             reward=0.0,
-            done=True,
+            done=False,
             modified_context=False
         )
     
     def _execute_tool(self, function_name: str, arguments: Dict[str, Any]) -> int:
         """执行工具函数"""
-        a = int(arguments["a"])
-        b = int(arguments["b"])
-        
-        if function_name == "star_operation":
-            return a + b - 1
-        elif function_name == "flower_operation":
-            return a * 2 + b
-        elif function_name == "moon_operation":
-            return (a + b) * 2
-        elif function_name == "sun_operation":
-            return a * b - a
+        if function_name in ["flower_operation", "moon_operation", "star_operation", "sun_operation"]:
+            a = int(arguments["a"])
+            b = int(arguments["b"])
+            
+            result = self.tools.forward(function_name, **{"a": a, "b": b})
+        elif function_name == "summarize":
+            text = arguments["text"]
+            messages = arguments["messages"]
+            result = self.tools.forward(function_name, **{"text": text, "messages": messages})
         else:
-            raise ValueError(f"Unknown function: {function_name}")
+            raise ValueError(f"Invalid function name: {function_name}")
+        
+        return result
     
     async def close(self):
         """清理环境资源"""

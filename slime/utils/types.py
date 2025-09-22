@@ -23,10 +23,10 @@ class Sample:
     rollout_log_probs: Optional[list[float]] = None  # Log probabilities from rollout engine
 
     class Status(Enum):
-        PENDING = "pending"
-        COMPLETED = "completed"
-        TRUNCATED = "truncated"
-        ABORTED = "aborted"
+        PENDING = "pending"   # 正在生成中
+        COMPLETED = "completed"  # 完成
+        TRUNCATED = "truncated"  # 超出max length被截断
+        ABORTED = "aborted"  # 被打断
 
     status: Status = Status.PENDING
     metadata: dict = field(default_factory=dict)
@@ -44,6 +44,14 @@ class Sample:
         return Sample(**data)
 
     def get_reward_value(self, args) -> float:
+        """return reward if args.reward_key is not specified, otherwise return reward[args.reward_key]
+
+        Args:
+            args (_type_): _description_
+
+        Returns:
+            float: reward value
+        """
         return self.reward if not args.reward_key else self.reward[args.reward_key]
 
 

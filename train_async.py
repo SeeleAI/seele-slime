@@ -6,6 +6,7 @@ from slime.utils.wandb_utils import init_wandb_primary
 
 
 def train(args):
+    breakpoint()
     assert not args.colocate, "Colocation is not supported for async training."
     # allocate the GPUs
     pgs = create_placement_groups(args)
