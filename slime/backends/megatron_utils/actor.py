@@ -31,7 +31,7 @@ from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTe
 class MegatronTrainRayActor(TrainRayActor):
     def init(self, args, role, wandb_run_id, with_ref=False):
         super().init(args, role, wandb_run_id, with_ref)
-
+        # here it initialize torch distributed
         init(args)
 
         if is_megatron_main_rank():

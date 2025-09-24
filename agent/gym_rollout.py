@@ -548,6 +548,67 @@ class TrajectoryProducer:
         
         return trajectory_results
 
+class TrajectoryConsumer:
+    """
+    轨迹消费者 - 从队列取数据并管理buffer
+    
+    负责从异步队列中获取trajectory结果，处理并放入buffer，
+    然后监控buffer状态直到达到目标数量。
+    """
+    
+    def __init__(self, args, data_source: GymRolloutDataSource, trajectory_queue: asyncio.Queue, stop_event: asyncio.Event):
+        self.args = args
+        self.data_source = data_source
+        self.trajectory_queue = trajectory_queue
+        self.stop_event = stop_event
+        self.consumed_count = 0
+        
+    async def run_until_target(self, target_size: int) -> List[Sample]:
+        """运行直到buffer达到目标数量"""
+        print(f"TrajectoryConsumer started, target: {target_size}")
+        
+        while self.data_source.get_step_buffer_length() < target_size:
+            try:
+                # 从队列获取trajectory结果（带超时）
+                trajectory_results = await asyncio.wait_for(
+                    self.trajectory_queue.get(), 
+                    timeout=5.0
+                )
+                
+                # 处理trajectories并放入buffer
+                await self._process_trajectories(trajectory_results)
+                
+            except asyncio.TimeoutError:
+                # 超时检查是否应该停止
+                if self.stop_event.is_set():
+                    print("Consumer: Stop event set, breaking")
+                    break
+                # 检查是否有足够数据
+                current_size = self.data_source.get_step_buffer_length()
+                print(f"Consumer: Timeout waiting for data, current buffer size: {current_size}/{target_size}")
+                if current_size >= target_size:
+                    break
+                continue
+            except Exception as e:
+                print(f"Consumer error: {e}")
+                continue
+        
+        # 返回结果
+        result = self.data_source.get_steps_from_buffer(target_size)
+        print(f"TrajectoryConsumer completed, returned {len(result)} steps")
+        return result
+    
+    async def _process_trajectories(self, trajectory_results):
+        """处理trajectory结果并放入buffer"""
+        # 将所有steps展平并放入buffer
+        all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
+        
+        if all_steps:
+            self.data_source.add_steps_to_buffer(all_steps)
+            self.consumed_count += len(all_steps)
+            print(f"Consumer: Processed {len(all_steps)} steps from {len(trajectory_results)} trajectories, "
+                  f"buffer size: {self.data_source.get_step_buffer_length()}, total consumed: {self.consumed_count}")
+
 async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
     """
     新的实现将生产者和消费者分离为独立的异步任务：

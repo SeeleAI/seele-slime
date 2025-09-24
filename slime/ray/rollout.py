@@ -19,6 +19,7 @@ def create_rollout_engines(args, pg):
         return []
 
     num_gpu_per_engine = min(args.rollout_num_gpus_per_engine, args.num_gpus_per_node)
+
     num_engines = args.rollout_num_gpus // num_gpu_per_engine
 
     pg, reordered_bundle_indices = pg
@@ -181,6 +182,10 @@ class RolloutManager:
         nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         # when doing multi-node serving, we will only send request to node-0 for each engine.
         self.rollout_engines = self.all_rollout_engines[::nodes_per_engine]
+        # A lock is used to prevent race conditions. When multiple parts of your 
+        # application try to access a shared resource at the same time (like picking 
+        # an available engine from the self.rollout_engines list), a lock ensures 
+        # that only one operation can proceed at a time.
         self.rollout_engine_lock = Lock.options(
             num_cpus=1,
             num_gpus=0,
