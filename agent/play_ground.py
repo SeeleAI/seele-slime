@@ -22,7 +22,7 @@ if __name__ == "__main__":
 
     messages = [
         {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": "Calculate the following expression: 3 ☽ 1 ☽ 2 ❀ 2, remaining tokens: 2"}
+        {"role": "user", "content": "Calculate the following expression: 3 ☽ 1 ☽ 2 ❀ 2, remaining tokens: 100"}
     ]
     prompt = [tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)]
 

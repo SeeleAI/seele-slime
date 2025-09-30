@@ -33,9 +33,10 @@ import wandb
 
 from slime.utils.misc import load_function
 from slime.utils.ray_utils import Box
-from slime.utils.types import Sample
+from agent.base.protocal import MySample
 from slime.utils.wandb_utils import init_wandb_secondary
 from agent.gym_rollout_datasource import GymRolloutDataSource
+from slime.rollout.sglang_rollout import GenerateState
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -100,7 +101,7 @@ class GymRolloutController:
             data = torch.load(
                 open(self.args.load_debug_rollout_data.format(rollout_id=rollout_id), "rb"),
             )["samples"]
-            data = [Sample.from_dict(sample) for sample in data]
+            data = [MySample.from_dict(sample) for sample in data]
         else:
             # 生成数据，现在直接返回List[Sample]
             data = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
@@ -128,7 +129,7 @@ class GymRolloutController:
         log_rollout_data(rollout_id, self.args, data, time() - start_time)
         
         # 转换为训练数据
-        data = self._convert_samples_to_train_data(data)
+        data = self._convert_messages_to_train_data(data)
         return Box(ray.put(data))
 
     def eval(self, rollout_id):
@@ -140,107 +141,119 @@ class GymRolloutController:
 
         data = self.eval_generate_rollout(self.args, rollout_id, self.data_source, evaluation=True)
         log_eval_data(rollout_id, self.args, data)
+    
+    def _create_loss_mask_from_messages(self, messages: List[dict[str, str]]) -> tuple[List[int], int]:
+        """Create loss mask for a message input
 
-    def post_process_rewards(self, samples: List[Sample]):
-        """
-        处理rewards，支持gym环境的trajectory-based rewards
-        按prompt_group_id计算GRPO advantages
-        """
-        if self.custom_reward_post_process_func is not None:
-            return self.custom_reward_post_process_func(self.args, samples)
+        Args:
+            messages (List[dict[str, str]]): multi-turn conversation messages
 
-        raw_rewards = [sample.get_reward_value(self.args) for sample in samples]
+        Returns:
+            tuple[List[int], int]: loss mask, 0 for user/sys input, 1 for assistant output, and the response length
+        """
+        state = GenerateState(self.args)
+        if not messages:
+            return [], 0
+        # all_input_ids = state.tokenizer.apply_chat_template(
+        #     messages, add_generation_prompt=False, tokenize=True
+        # )
+        all_input_ids = self._get_input_ids_from_messages(messages)
+
+        # Start with zeros for the whole conversation token length.
+        loss_mask = [0] * len(all_input_ids)
+
+        def prefix_token_len(msgs_prefix: List[dict[str, str]], add_gen_prompt: bool) -> int:
+            """Helper: returns length of tokenized chat template for a prefix of messages."""
+            return len(
+                state.tokenizer.apply_chat_template(msgs_prefix, add_generation_prompt=add_gen_prompt, tokenize=True)
+            )
+
+        # Mark assistant response ranges.
+        # We compute, for each assistant message at index i, the token index where that assistant response begins
+        # (using the chat template with generation prompt enabled for the prefix), then mark the length of the response.
+        for idx, msg in enumerate(messages):
+            if msg.get("role") != "assistant":
+                continue
+
+            # Token length of everything before the assistant's generated response.
+            # We set add_generation_prompt=True so the tokenizer formats the prompt exactly like the generation-time input.
+            start = prefix_token_len(messages[:idx], add_gen_prompt=True)
+
+            # Token length for this assistant message content (+1 for EOS as in original code).
+            assistant_content_tokens = len(state.tokenizer.encode(msg["content"]))
+            response_len = assistant_content_tokens + 1  # +1 for EOS token
+
+            # Cap ranges to avoid indexing errors in case of slight mismatches.
+            end = min(start + response_len, len(loss_mask))
+
+            loss_mask[start:end] = [1] * (end - start)
+
+        # Compute the prompt length used by the generator for the first user/sys turn (keeps original behavior).
+        len_of_prompt = prefix_token_len(messages[:2], add_gen_prompt=True)
+
+        # Generation portion length
+        gen_len = len(all_input_ids) - len_of_prompt
+        gen_len = max(0, gen_len)
         
-        if (
-            self.args.advantage_estimator in ["grpo", "gspo", "reinforce_plus_plus_baseline"]
-            and self.args.rewards_normalization
-        ):
-            # 按prompt_group_id分组计算advantages
-            prompt_groups = defaultdict(list)
-            for i, sample in enumerate(samples):
-                group_id = sample.metadata.get("prompt_group_id", f"default_{i}")
-                prompt_groups[group_id].append((i, sample))
-            
-            # 初始化advantages tensor
-            advantages = torch.zeros(len(samples), dtype=torch.float32)
-            
-            for group_id, group_samples in prompt_groups.items():
-                indices = [idx for idx, _ in group_samples]
-                
-                # 获取该group中每个trajectory的reward
-                trajectory_rewards = {}
-                for idx, sample in group_samples:
-                    traj_id = sample.metadata.get("trajectory_id", f"traj_{idx}")
-                    if traj_id not in trajectory_rewards:
-                        trajectory_rewards[traj_id] = sample.reward
-                
-                # 转换为tensor计算advantages
-                # [user,assistant,tool_result,tool_call,user,assistant,...]
-                # [0,1,0,1,0,1]
-                # S0,A0 user,assistant
-                # S1,A1 (user,assistant,tool_result)  tool_call
-                # （(user,assistant,tool_result),tool_call)
-                # S,A,adv,log_probs
-                # aa bb (S0,A0)
-                # aa,bb,cc dd (S1,A1) messages
-                # ee,ff(S2,A2)
-                # ee,ff,gg hh(S3,A3) messages
-                # [(S0,A0),(S1,A1),(S2,A2),(S3,A3)]1 t1 t20 t3
-                unique_rewards = list(trajectory_rewards.values())
-                if len(unique_rewards) > 1:
-                    rewards_tensor = torch.tensor(unique_rewards, dtype=torch.float32)
-                    mean = rewards_tensor.mean()
-                    group_advantages = rewards_tensor - mean
-                    
-                    if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
-                        std = rewards_tensor.std()
-                        if std > 0:
-                            group_advantages = group_advantages / std
-                    
-                    # 将advantages分配给每个sample
-                    traj_to_advantage = dict(zip(trajectory_rewards.keys(), group_advantages.tolist()))
-                    for idx, sample in group_samples:
-                        traj_id = sample.metadata.get("trajectory_id", f"traj_{idx}")
-                        advantages[idx] = traj_to_advantage[traj_id]
-                else:
-                    # 只有一个trajectory或所有rewards相同，advantages为0
-                    for idx, _ in group_samples:
-                        advantages[idx] = 0.0
-            
-            return raw_rewards, advantages.tolist()
-
-        return raw_rewards, raw_rewards
-
-    def _convert_samples_to_train_data(self, samples: List[Sample]):
+        return loss_mask[len_of_prompt:], gen_len
+    
+    def _get_input_ids_from_messages(self, messages: List[dict[str, str]]):
+        state = GenerateState(self.args)
+        # Lynx: Since apply_chat_template may include an additional token after the assistant
+        # output, we should take care of it.
+        # e.g., <|im_start|>assistant\nBecause it was on the other side of the road.<|im_end|>\n
+        # the last '\n' is not a generation of the assistant.
+        # first apply chat template before the last assistant output
+        if not messages:
+            return []
+        input_ids = state.tokenizer.apply_chat_template(messages[:-1], add_generation_prompt=True, tokenize=True)
+        final_assistant_response = messages[-1]["content"] + state.tokenizer.eos_token
+        input_ids = input_ids + state.tokenizer.encode(final_assistant_response)
+        
+        return input_ids
+    
+    def _format_rollout_logprobs(self, logprobs: List[List[float]], loss_mask: List[int]):
         """
-        Convert inference generated samples to training data.
+        Formats a flattened list of log probabilities according to a loss mask.
         """
-        raw_rewards, rewards = self.post_process_rewards(samples)
+        if not logprobs or not loss_mask:
+            return []
+        # 1. Flatten the nested list of log probabilities.
+        flat_logprobs = [prob for conv_probs in logprobs for prob in conv_probs]
+        
+        assert len(flat_logprobs) == sum(loss_mask), (
+            f"Logprobs length {len(flat_logprobs)} does not match "
+            f"loss_mask sum {sum(loss_mask)}"
+        )
+        
+        # 3. Create an iterator to consume the logprobs sequentially.
+        logprobs_iter = iter(flat_logprobs)
+        
+        # 4. Use a list comprehension: if the mask is 1, take the next logprob; otherwise, use 0.0.
+        return [next(logprobs_iter) if mask_value else 0.0 for mask_value in loss_mask]
 
-        assert len(raw_rewards) == len(samples)
-        assert len(rewards) == len(samples)
-
+    def _convert_messages_to_train_data(self, samples: Union[list[MySample], list[list[MySample]]]):
+        """Convert message based Samples into training data."""
+        assert isinstance(samples, list), "samples must be a list"
+        # assert isinstance(samples[0], MySample), f"samples must be a list of Sample, got{type(samples[0])}"
+        
+        input_ids = [self._get_input_ids_from_messages(sample.messages) for sample in samples]
+        response_len = []
+        loss_mask = []
+        for sample in samples:
+            loss_m, res_len = self._create_loss_mask_from_messages(sample.messages)
+            response_len.append(res_len)
+            loss_mask.append(loss_m)
+        
         train_data = {
-            "tokens": [sample.tokens for sample in samples],
-            "response_lengths": [sample.response_length for sample in samples],
-            "rewards": rewards,  # 这里实际上是advantages
-            "raw_reward": raw_rewards,
-            "truncated": [1 if sample.status == Sample.Status.TRUNCATED else 0 for sample in samples],
+            "tokens": input_ids,
+            "response_lengths": response_len,
+            "rewards": [sample.advantage for sample in samples],  # Already calculated rewards during the rollout
+            "raw_reward": [sample.reward for sample in samples],
+            "truncated": [1 if sample.status == MySample.Status.TRUNCATED else 0 for sample in samples],
             "sample_indices": [sample.index for sample in samples],
         }
-
-        # loss mask
-        loss_masks = []
-        for sample in samples:
-            if sample.loss_mask is None:
-                sample.loss_mask = [1] * sample.response_length
-            assert (
-                len(sample.loss_mask) == sample.response_length
-            ), f"loss mask length {len(sample.loss_mask)} != response length {sample.response_length}"
-            loss_masks.append(sample.loss_mask)
-        train_data["loss_masks"] = loss_masks
-
-        # 添加gym环境特有的metadata
+        train_data["loss_masks"] = loss_mask
         if samples and samples[0].metadata:
             if "trajectory_id" in samples[0].metadata:
                 train_data["trajectory_ids"] = [sample.metadata["trajectory_id"] for sample in samples]
@@ -250,16 +263,24 @@ class GymRolloutController:
             
             if "step_number" in samples[0].metadata:
                 train_data["step_numbers"] = [sample.metadata["step_number"] for sample in samples]
-            
-            if "raw_reward" in samples[0].metadata:
-                train_data["raw_reward"] = [sample.metadata["raw_reward"] for sample in samples]
 
             if "round_number" in samples[0].metadata:
                 train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
 
         # Add rollout log probabilities for off-policy correction
-        if samples and samples[0].rollout_log_probs is not None:
-            train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
+        # Lynx: We have assumsed that the LLM will always use EOS token as the stop token,
+        # only then the log probs are aligned with the loss mask.
+        # Lynx: NOTE: some samples still hit sum(loss_mask) != len(logprobs) because
+        # Qwen sometimes output the EOS token used in pre-training, WTF?
+        if samples and any(samp.rollout_log_probs for samp in samples):
+            rollout_logprobs = []
+            for sample, mask in zip(samples, loss_mask):
+                try:
+                    rollout_logprobs.append(self._format_rollout_logprobs(sample.rollout_log_probs, mask))
+                except:
+                    breakpoint()
+                
+            train_data["rollout_log_probs"] = rollout_logprobs
 
         if samples and samples[0].train_metadata is not None:
             train_data["metadata"] = [sample.train_metadata for sample in samples]

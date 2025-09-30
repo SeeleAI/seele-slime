@@ -181,16 +181,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "It is basically `max_tokens` in sglang."
                 ),
             )
-                        parser.add_argument(
-                "--trajectory-queue-size",
-                type=int,
-                default=10,
-                help=(
-                    "异步生产者-消费者模式中trajectory队列的最大大小。"
-                    "控制生产者和消费者之间的缓冲区大小，避免内存过度使用。"
-                    "较大的值可以提高并发性，但会占用更多内存。"
-                ),
-            )
             parser.add_argument(
                 "--rollout-skip-special-tokens",
                 action="store_true",

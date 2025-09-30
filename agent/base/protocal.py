@@ -44,7 +44,7 @@ class Trajectory:
 
 
 @dataclass
-class Sample:
+class MySample:
     """The sample generated"""
 
     index: Optional[int] = None
@@ -83,8 +83,8 @@ class Sample:
 
     @staticmethod
     def from_dict(data: dict):
-        data["status"] = Sample.Status(data["status"])
-        return Sample(**data)
+        data["status"] = MySample.Status(data["status"])
+        return MySample(**data)
 
     def get_reward_value(self, args) -> float:
         """return reward if args.reward_key is not specified, otherwise return reward[args.reward_key]

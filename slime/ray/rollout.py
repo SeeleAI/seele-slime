@@ -169,14 +169,14 @@ class RolloutManager:
     def __init__(self, args, pg, wandb_run_id):
         self.args = args
         _start_router(args)
-        # self.controller = GymRolloutController.options(
-        #     num_cpus=1,
-        #     num_gpus=0,
-        # ).remote(args, wandb_run_id=wandb_run_id)
-        self.controller = RolloutController.options(
+        self.controller = GymRolloutController.options(
             num_cpus=1,
             num_gpus=0,
         ).remote(args, wandb_run_id=wandb_run_id)
+        # self.controller = RolloutController.options(
+        #     num_cpus=1,
+        #     num_gpus=0,
+        # ).remote(args, wandb_run_id=wandb_run_id)
 
         self.all_rollout_engines = create_rollout_engines(args, pg)
         nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)

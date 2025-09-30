@@ -191,3 +191,16 @@ local/
 glm/
 _examples_synced/
 .env
+cache/models--Qwen--Qwen3-Coder-30B-A3B-Instruct/refs/main
+agent_env.zip
+qwen25-14b-agent/qwen25-14b/.gitattributes
+qwen25-14b-agent/qwen25-14b/chat_template.jinja
+qwen25-14b-agent/qwen25-14b/config.json
+qwen25-14b-agent/qwen25-14b/generation_config.json
+qwen25-14b-agent/qwen25-14b/LICENSE
+qwen25-14b-agent/qwen25-14b/merges.txt
+qwen25-14b-agent/qwen25-14b/model-00001-of-00016.safetensors
+qwen25-14b-agent/qwen25-14b/model-00006-of-00016.safetensors
+qwen25-14b-agent/qwen25-14b/model-00009-of-00016.safetensors
+qwen25-14b-agent/qwen25-14b/model-00010-of-00016.safetensors
+qwen25-14b-agent/qwen25-14b/README.md

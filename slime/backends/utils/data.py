@@ -159,13 +159,15 @@ def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
         data = ray.get(rollout_data_ref.inner)
         dist.broadcast_object_list([data], src=0)
     else:
+        # other ranks receive the data, but must provide a list with the same size.
         data = [None]
         dist.broadcast_object_list(data, src=0)
+        # receive from rank 0, extract from the temporary list
         data = data[0]
 
     # save the unprocessed reward for logging
     rollout_data["raw_reward"] = data["raw_reward"]
-
+    # total length is the length of prompt + response
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
@@ -176,11 +178,15 @@ def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
         # Group-aware partitioning to keep each group together
         n_samples_per_prompt = getattr(args, "n_samples_per_prompt", 1)
         # Calculate group-level lengths (sum of lengths for each group)
-        num_groups = len(total_lengths) // n_samples_per_prompt
+        num_groups = len(total_lengths) // n_samples_per_prompt  # total number of different GRPO groups
         group_lengths = []
         for i in range(num_groups):
+            # slicing
             start_idx = i * n_samples_per_prompt
             end_idx = start_idx + n_samples_per_prompt
+            # total length of one GRPO group, note that this assumes correct ordering,
+            # otherwise the slicing will result in incorrect grouping
+            # Lynx: if fully async, and we enable swip out tools, this assumption will be broken
             group_total_length = sum(total_lengths[start_idx:end_idx])
             group_lengths.append(group_total_length)
 
@@ -192,12 +198,13 @@ def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
         for dp_rank_groups in group_partitions:
             trajectory_indices = []
             for group_idx in dp_rank_groups:
-                # Add all trajectories in this group
+                # Add all trajectories in this group, here we restore all trajectories
                 start_idx = group_idx * n_samples_per_prompt
                 end_idx = start_idx + n_samples_per_prompt
-                trajectory_indices.extend(range(start_idx, end_idx))
+                trajectory_indices.extend(range(start_idx, end_idx))  # also assumes that trajectories are placed continuously
             parititions.append(trajectory_indices)
-
+            
+    # split and emit data to different ranks
     def get_partition(val):
         if args.balance_data:
             return [val[i] for i in parititions[dp_rank]]
