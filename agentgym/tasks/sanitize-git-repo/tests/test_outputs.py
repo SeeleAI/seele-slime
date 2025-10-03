@@ -5,11 +5,6 @@ from pathlib import Path
 
 import git
 
-# FAKE_AWS_ACCESS_KEY_ID =
-# FAKE_AWS_SECRET_ACCESS_KEY =
-# FAKE_GITHUB_TOKEN = 
-# FAKE_HUGGINGFACE_TOKEN = 
-# FAKE_HUGGINGFACE_TOKEN_2 = 
 
 CONTAMINATED_PATHS = [
     "/app/dclm/ray_processing/ray_cluster.yaml",
