@@ -191,3 +191,5 @@ local/
 glm/
 _examples_synced/
 .env
+
+agentgym/tasks/sanitize-git-repo
