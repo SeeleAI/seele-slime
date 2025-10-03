@@ -1,0 +1,52 @@
+FROM python:3.12-slim
+
+# ===== 构建期代理（仅构建时生效；运行期不继承）=====
+ARG http_proxy=http://172.21.0.4:7899
+ARG https_proxy=http://172.21.0.4:7899
+ARG no_proxy=localhost,127.0.0.1,hf-mirror.com,.hf-mirror.com
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# 关键：同时安装 bash + docker.io（只需要 CLI，用于 docker exec）
+RUN set -eux; \
+    export http_proxy="${http_proxy}"; \
+    export https_proxy="${https_proxy}"; \
+    export no_proxy="${no_proxy}"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bash ripgrep; \
+    apt-get install -y docker.io; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN set -eux; \
+    export http_proxy="${http_proxy}"; \
+    export https_proxy="${https_proxy}"; \
+    export no_proxy="${no_proxy}"; \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+COPY app /app/app
+
+# 非 root 用户
+RUN useradd -m -u 1000 -s /bin/bash appuser \
+    && mkdir -p /app/tmp /app/logs \
+    && chown -R appuser:appuser /app
+
+USER appuser
+WORKDIR /app
+
+EXPOSE 8000
+
+ENV HF_ENDPOINT=https://hf-mirror.com \
+    no_proxy=localhost,127.0.0.1,hf-mirror.com,.hf-mirror.com
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# ====== Task-specific payload (auto-generated) ======
+# Copy task files directly into WORKDIR /app
+USER root
+WORKDIR /app
+COPY . /app/
+USER appuser
+# ====================================================

@@ -1,5 +1,8 @@
 import os
+<<<<<<< HEAD
+=======
 from typing import Any, Dict
+>>>>>>> origin/main
 
 from transformers import AutoConfig
 
@@ -7,7 +10,11 @@ from slime.backends.sglang_utils.arguments import add_sglang_arguments
 from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 
 
+<<<<<<< HEAD
+def reset_megatron_args(parser, name, type, default):
+=======
 def reset_arg(parser, name, **kwargs):
+>>>>>>> origin/main
     """
     Reset the default value of a Megatron argument.
     :param parser: The argument parser.
@@ -16,11 +23,18 @@ def reset_arg(parser, name, **kwargs):
     """
     for action in parser._actions:
         if name in action.option_strings:
+<<<<<<< HEAD
+            action.default = default
+            break
+    else:
+        parser.add_argument(name, type=type, default=default)
+=======
             if "default" in kwargs:
                 action.default = kwargs["default"]
             break
     else:
         parser.add_argument(name, **kwargs)
+>>>>>>> origin/main
 
 
 def get_slime_extra_args_provider(add_custom_arguments=None):
@@ -76,8 +90,13 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
 
+<<<<<<< HEAD
+            reset_megatron_args(parser, "--distributed-backend", str, "nccl")
+            reset_megatron_args(parser, "--distributed-timeout-minutes", int, 10)
+=======
             reset_arg(parser, "--distributed-backend", type=str, default="nccl")
             reset_arg(parser, "--distributed-timeout-minutes", type=int, default=10)
+>>>>>>> origin/main
 
             return parser
 
@@ -96,11 +115,14 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+<<<<<<< HEAD
+=======
                 "--use-hf-config-for-megatron",
                 action="store_true",
                 help="Whether to use HF config for Megatron core to define the model architecture.",
             )
             parser.add_argument(
+>>>>>>> origin/main
                 "--model-name",
                 type=str,
                 default=None,
@@ -113,7 +135,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-function-path",
                 type=str,
+<<<<<<< HEAD
+                default="slime.rollout.sglang_rollout.generate_rollout", #原来如此
+=======
                 default="slime.rollout.sglang_rollout.generate_rollout",
+>>>>>>> origin/main
                 help=(
                     "Path to the rollout generation function."
                     "You should use this model to create your own custom rollout function, "
@@ -125,6 +151,33 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+<<<<<<< HEAD
+                "--expected_steps_per_trajectory",
+                type=int,
+                default=1, 
+                help=(
+                    ""
+                ),
+            )
+            parser.add_argument(
+                "--max-turns",
+                type=int,
+                default=1, #原来如此
+                help=(
+                    "最大gym交互轮数"
+                ),
+            )
+            parser.add_argument(
+                "--filter-zero-advantage",
+                type=str,
+                default=False, #原来如此
+                help=(
+                    "dynamic sample"
+                ),
+            )
+            parser.add_argument(
+=======
+>>>>>>> origin/main
                 "--rollout-temperature",
                 type=float,
                 default=1.0,
@@ -372,7 +425,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-batch-size",
                 type=int,
+<<<<<<< HEAD
+                required=False,
+=======
                 required=True,
+>>>>>>> origin/main
                 help=(
                     "The number of prompts in each rollout step. "
                     "The total data returned should be rollout_batch_size * n_samples_per_prompt. "
@@ -385,7 +442,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             # gbs of the training, note that the gbs is of sample, not of prompts,
             # so if you hope to train 1 step for each rollout, the global_bach_size should be set as
             # `rollout_batch_size * n_samples_per_prompt`.
+<<<<<<< HEAD
+            reset_megatron_args(parser, "--global-batch-size", int, None)
+=======
             reset_arg(parser, "--global-batch-size", type=int, default=None)
+>>>>>>> origin/main
             parser.add_argument(
                 "--num-steps-per-rollout",
                 type=int,
@@ -396,7 +457,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             # mbs for the training, will be ignored if `use_dynamic_batch_size` is set.
+<<<<<<< HEAD
+            reset_megatron_args(parser, "--micro-batch-size", int, 1)
+=======
             reset_arg(parser, "--micro-batch-size", type=int, default=1)
+>>>>>>> origin/main
             parser.add_argument(
                 "--balance-data",
                 action="store_true",
@@ -452,7 +517,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
 
             # change the default value of eval_interval from Megatron to None
+<<<<<<< HEAD
+            reset_megatron_args(parser, "--eval-interval", int, None)
+=======
             reset_arg(parser, "--eval-interval", type=int, default=None)
+>>>>>>> origin/main
 
             parser.add_argument(
                 "--eval-prompt-data",
@@ -497,12 +566,19 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--ref-ckpt-step", type=int, default=None, help="The checkpoint step for reference model. "
             )
+<<<<<<< HEAD
+            reset_megatron_args(parser, "--load", str, None)
+            reset_megatron_args(parser, "--save", str, None)
+            reset_megatron_args(parser, "--save-interval", int, None)
+            reset_megatron_args(parser, "--seed", int, 1234)
+=======
             reset_arg(parser, "--load", type=str, default=None)
             reset_arg(parser, "--save", type=str, default=None)
             reset_arg(parser, "--save-interval", type=int, default=None)
             reset_arg(parser, "--seed", type=int, default=1234)
             reset_arg(parser, "--clip-grad", type=float, default=1.0)
             reset_arg(parser, "--calculate-per-token-loss", action="store_true")
+>>>>>>> origin/main
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
@@ -635,7 +711,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--wandb-host", type=str, default=None)
             parser.add_argument("--wandb-team", type=str, default=None)
             parser.add_argument("--wandb-group", type=str, default=None)
+<<<<<<< HEAD
+            reset_megatron_args(parser, "--wandb-project", str, None)
+=======
             reset_arg(parser, "--wandb-project", type=str, default=None)
+>>>>>>> origin/main
             parser.add_argument(
                 "--disable-wandb-random-suffix",
                 action="store_false",
@@ -897,12 +977,15 @@ def parse_args(add_custom_arguments=None):
         args = megatron_parse_args(extra_args_provider=add_slime_arguments)
         if getattr(args, "hf_checkpoint", None):
             hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+<<<<<<< HEAD
+=======
             if args.use_hf_config_for_megatron:
                 from slime.backends.megatron_utils.config_mapping import get_mapper
 
                 megatron_config_from_hf = get_mapper(hf_config.model_type)(hf_config)
                 _validate_and_update_megatron_args_from_hf(args, megatron_config_from_hf.transformer_config)
                 _validate_and_update_megatron_args_from_hf(args, megatron_config_from_hf.gpt_model_args)
+>>>>>>> origin/main
             hf_validate_args(args, hf_config)
 
         args.rank = 0
@@ -921,6 +1004,8 @@ def parse_args(add_custom_arguments=None):
 
         args = load_fsdp_args(extra_args_provider=add_slime_arguments)
 
+<<<<<<< HEAD
+=======
     slime_validate_args(args)
 
     if backend == "megatron":
@@ -941,6 +1026,7 @@ def parse_args(add_custom_arguments=None):
 
 
 def slime_validate_args(args):
+>>>>>>> origin/main
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
             raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
@@ -1041,14 +1127,32 @@ def slime_validate_args(args):
             )
         args.global_batch_size = global_batch_size
 
+<<<<<<< HEAD
+    # assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
+    #     f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+    #     f"is not a multiple of global_batch_size {args.global_batch_size}"
+    # )
+=======
     assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
         f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
         f"is not a multiple of global_batch_size {args.global_batch_size}"
     )
+>>>>>>> origin/main
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False
         print("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
+<<<<<<< HEAD
+        
+    # Lynx: temporally use the original logic
+    if args.over_sampling_batch_size is None:
+        args.over_sampling_batch_size = args.rollout_batch_size
+
+    # assert args.over_sampling_batch_size >= args.rollout_batch_size, (
+    #     f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
+    #     f"rollout_batch_size {args.rollout_batch_size}"
+    # )
+=======
 
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
@@ -1057,6 +1161,7 @@ def slime_validate_args(args):
         f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
         f"rollout_batch_size {args.rollout_batch_size}"
     )
+>>>>>>> origin/main
 
     if args.num_epoch is not None:
         if args.num_rollout is not None:
@@ -1072,6 +1177,25 @@ def slime_validate_args(args):
             "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
         )
 
+<<<<<<< HEAD
+    if backend == "megatron":
+        megatron_validate_args(args)
+
+        # always use varlen
+        args.variable_seq_lengths = True
+        if getattr(args, "moe_token_dispatcher_type", None) == "allgather":
+            print(
+                "--moe-token-dispatcher-type allgather does not support variable sequence length, "
+                "please use alltoall dispatcher instead."
+            )
+            args.moe_token_dispatcher_type = "alltoall"
+
+    sglang_validate_args(args)
+
+    return args
+
+=======
+>>>>>>> origin/main
 
 def hf_validate_args(args, hf_config):
     equal = lambda x, y: x == y
@@ -1089,6 +1213,8 @@ def hf_validate_args(args, hf_config):
                 f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
                 f"{megatron_config_name} {getattr(args, megatron_config_name)}, please check the config."
             )
+<<<<<<< HEAD
+=======
 
 
 def _validate_and_update_megatron_args_from_hf(args, args_from_hf_config: Dict[str, Any]):
@@ -1098,3 +1224,4 @@ def _validate_and_update_megatron_args_from_hf(args, args_from_hf_config: Dict[s
                 f"Argument {key} is not consistent. {key} in args is {getattr(args, key)}, but from HF config is {value}."
             )
         setattr(args, key, value)
+>>>>>>> origin/main

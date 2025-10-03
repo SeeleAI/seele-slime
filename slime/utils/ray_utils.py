@@ -1,4 +1,5 @@
 class Box:
+    """Protect the passed object"""
     def __init__(self, inner):
         self._inner = inner
 

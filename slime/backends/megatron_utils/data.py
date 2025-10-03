@@ -1,5 +1,8 @@
 import math
+<<<<<<< HEAD
+=======
 from typing import Optional
+>>>>>>> origin/main
 
 import numpy as np
 import torch
@@ -9,9 +12,13 @@ from megatron.core import mpu
 from megatron.core.packed_seq_params import PackedSeqParams
 
 import wandb
+<<<<<<< HEAD
+from slime.utils.flops_utils import calculate_fwd_flops
+=======
 from slime.utils.data import get_minimum_num_micro_batch_size
 from slime.utils.flops_utils import calculate_fwd_flops
 from slime.utils.seqlen_balancing import get_seqlen_balanced_partitions
+>>>>>>> origin/main
 from slime.utils.timer import Timer
 
 from .cp_utils import get_sum_of_sample_mean, slice_with_cp
@@ -98,6 +105,8 @@ def gather_log_data(metic_name, args, rollout_id, log_dict):
         return None
 
 
+<<<<<<< HEAD
+=======
 class DataIterator:
     def __init__(
         self,
@@ -224,6 +233,7 @@ def get_data_iterator(args, model, rollout_data):
     )
 
 
+>>>>>>> origin/main
 def log_rollout_data(rollout_id, args, rollout_data):
     if mpu.get_tensor_model_parallel_rank() == 0 and mpu.is_pipeline_last_stage():
         cp_size = mpu.get_context_parallel_world_size()

@@ -18,7 +18,8 @@ import heapq
 from typing import List, Tuple
 
 
-def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+# Lynx: maybe read and understand this when I'm free
+def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool) -> list:
     # see: https://en.wikipedia.org/wiki/Largest_differencing_method
     class Set:
 
@@ -147,7 +148,7 @@ def greedy_partition(seqlen_list: List[int], k_partitions: int, equal_size: bool
     return partitions
 
 
-def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, equal_size: bool):
+def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, equal_size: bool) -> list[list[int]]:
     """get order of seq lengths to make partitions balanced, this is
         used in balacing sum of seqlength across dp ranks and microbatches
     Parameters:
@@ -163,9 +164,10 @@ def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, eq
         partitions (List[List[int]]):
             return k_partitions list containing the index of items.
     """
+    # group_lengths, dp_size, equal_size=True
     assert len(seqlen_list) >= k_partitions, f"number of items:[{len(seqlen_list)}] < k_partitions:[{k_partitions}]"
 
-    def _check_and_sort_partitions(partitions):
+    def _check_and_sort_partitions(partitions: list[list[int]]):
         assert len(partitions) == k_partitions, f"{len(partitions)} != {k_partitions}"
         seen_idx = set()
         sorted_partitions = [None] * k_partitions
@@ -174,6 +176,8 @@ def get_seqlen_balanced_partitions(seqlen_list: List[int], k_partitions: int, eq
             for idx in partition:
                 seen_idx.add(idx)
             sorted_partitions[i] = sorted(partition)
+        
+        # assert all samples are in the set
         assert seen_idx == set(range(len(seqlen_list)))
         return sorted_partitions
 

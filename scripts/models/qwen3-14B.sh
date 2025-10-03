@@ -14,5 +14,4 @@ MODEL_ARGS=(
    --vocab-size 151936
    --kv-channels 128
    --qk-layernorm
-   --untie-embeddings-and-output-weights
 )

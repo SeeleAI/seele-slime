@@ -2,12 +2,17 @@ import json
 import random
 import numpy as np
 import pandas as pd
+<<<<<<< HEAD
+
+from slime.utils.types import Sample
+=======
 import ray
 import torch.distributed as dist
 
 from slime.utils.types import Sample
 from .seqlen_balancing import get_seqlen_balanced_partitions
 from .timer import Timer
+>>>>>>> origin/main
 
 __all__ = ["Dataset"]
 
@@ -85,6 +90,8 @@ class Dataset:
 
     def __len__(self):
         return len(self.samples)
+<<<<<<< HEAD
+=======
 
 
 def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu):
@@ -171,3 +178,4 @@ def process_rollout_data(args, rollout_data_ref, dp_rank, dp_size):
         rollout_data[key] = val
 
     return rollout_data
+>>>>>>> origin/main

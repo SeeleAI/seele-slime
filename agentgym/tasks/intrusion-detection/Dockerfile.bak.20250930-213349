@@ -1,0 +1,76 @@
+FROM python:3.12-slim
+
+# ===== 构建期代理（仅构建时生效；运行期不继承）=====
+ARG http_proxy=http://172.21.0.4:7899
+ARG https_proxy=http://172.21.0.4:7899
+ARG no_proxy=localhost,127.0.0.1,hf-mirror.com,.hf-mirror.com
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# 基础工具：bash、ripgrep、docker.io（仅 CLI 用）、dos2unix（行尾兜底）
+RUN set -eux; \
+    export http_proxy="${http_proxy}"; \
+    export https_proxy="${https_proxy}"; \
+    export no_proxy="${no_proxy}"; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bash ripgrep dos2unix; \
+    apt-get install -y docker.io; \
+    rm -rf /var/lib/apt/lists/*
+
+# 依赖
+COPY requirements.txt /app/requirements.txt
+RUN set -eux; \
+    export http_proxy="${http_proxy}"; \
+    export https_proxy="${https_proxy}"; \
+    export no_proxy="${no_proxy}"; \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+# 应用代码（框架层）
+COPY app /app/app
+
+# 非 root 用户
+RUN useradd -m -u 1000 -s /bin/bash appuser \
+    && mkdir -p /app/tmp /app/logs \
+    && chown -R appuser:appuser /app
+
+USER appuser
+WORKDIR /app
+
+# ✅ 关键：保证运行期 pip --user 安装后的包可立即 import
+# Python 3.12 的 user-site 路径：~/.local/lib/python3.12/site-packages
+ENV PYTHONUSERBASE=/home/appuser/.local \
+    PYTHONPATH=/home/appuser/.local/lib/python3.12/site-packages:$PYTHONPATH \
+    PATH=/home/appuser/.local/bin:$PATH \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+EXPOSE 8000
+ENV HF_ENDPOINT=https://hf-mirror.com \
+    no_proxy=localhost,127.0.0.1,hf-mirror.com,.hf-mirror.com
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# ====== Task-specific payload (auto-generated) ======
+# 注意：这段是每个任务镜像“最后覆盖”的有效载荷
+USER root
+WORKDIR /app
+
+# 直接将任务文件落到 /app，并指定属主，避免 root:root
+COPY --chown=appuser:appuser . /app/
+
+# 统一加固：
+# - 若存在 run-tests.sh：修正 CRLF、加执行位
+# - 兜底确保 /app 权限为 appuser
+# - 创建测试报告目录（与工具对齐）
+RUN set -eux; \
+    if [ -f /app/run-tests.sh ]; then \
+        dos2unix /app/run-tests.sh || true; \
+        chmod 0755 /app/run-tests.sh; \
+    fi; \
+    mkdir -p /app/.test_results; \
+    chown -R appuser:appuser /app
+
+USER appuser
+# ====================================================
