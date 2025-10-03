@@ -10,7 +10,11 @@ MODEL_ARGS=(
    --disable-bias-linear
    --normalization "RMSNorm"
    --norm-epsilon 1e-6
+<<<<<<< HEAD
    --rotary-base 5000000
+=======
+   --rotary-base 1000000
+>>>>>>> origin/main
    --vocab-size 151936
    --kv-channels 128
    --qk-layernorm
