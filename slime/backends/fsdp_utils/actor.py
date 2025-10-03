@@ -8,8 +8,13 @@ from torch_memory_saver import torch_memory_saver
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 import wandb
+<<<<<<< HEAD
 from slime.backends.utils.data import process_rollout_data
 from slime.ray.train_actor import TrainRayActor
+=======
+from slime.ray.train_actor import TrainRayActor
+from slime.utils.data import process_rollout_data
+>>>>>>> origin/main
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.ppo_utils import compute_approx_kl, compute_policy_loss
 from slime.utils.timer import Timer, timer

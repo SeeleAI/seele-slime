@@ -7,7 +7,11 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 def _fetch_requirements(path):
     with open(path, "r") as fd:
+<<<<<<< HEAD
         return [r.strip() for r in fd.readlines()]
+=======
+        return [r.strip() for r in fd.readlines() if r.strip() and not r.startswith("#")]
+>>>>>>> origin/main
 
 
 # Custom wheel class to modify the wheel name
@@ -32,10 +36,22 @@ class bdist_wheel(_bdist_wheel):
 setup(
     author="slime Team",
     name="slime",
+<<<<<<< HEAD
     version="0.0.1",
     packages=find_packages(include=["slime*", "slime_plugins*"]),
     include_package_data=True,
     install_requires=_fetch_requirements("requirements.txt"),
+=======
+    version="0.1.0",
+    packages=find_packages(include=["slime*", "slime_plugins*"]),
+    include_package_data=True,
+    install_requires=_fetch_requirements("requirements.txt"),
+    extras_require={
+        "fsdp": [
+            "torch>=2.0", 
+        ]
+    },
+>>>>>>> origin/main
     python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3.10",

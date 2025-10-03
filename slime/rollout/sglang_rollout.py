@@ -42,11 +42,18 @@ class GenerateState(metaclass=SingletonMeta):
         self.reset()
 
     def reset(self):
+<<<<<<< HEAD
         self.remaining_batch_size = 0  # completed batch size
         self.pendings = set()  # 等待中的状态
         self.aborted = False
         
     # GRPO 组内，第一个list是sample level，第二个list是sample生成的一组response
+=======
+        self.remaining_batch_size = 0
+        self.pendings = set()
+        self.aborted = False
+
+>>>>>>> origin/main
     def submit_generate_tasks(self, samples: list[list[Sample]]):
         for group in samples:
             self.pendings.add(
@@ -60,7 +67,10 @@ class GenerateState(metaclass=SingletonMeta):
                     )
                 )
             )
+<<<<<<< HEAD
         # sample level
+=======
+>>>>>>> origin/main
         self.remaining_batch_size += len(samples)
 
 
@@ -68,6 +78,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     state = GenerateState(args)
 
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+<<<<<<< HEAD
     
     # must be pending or aborted samples.
     assert (
@@ -80,6 +91,14 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     # whether aborted from last rollout 
     if len(sample.response) > 0:
         # count how many tokens left from max new tokens, prompt length is excluded.
+=======
+
+    assert (
+        sample.status == Sample.Status.PENDING or sample.status == Sample.Status.ABORTED
+    ), f"Sample status is {sample.status}"
+
+    if len(sample.response) > 0:
+>>>>>>> origin/main
         sampling_params["max_new_tokens"] -= len(sample.tokens) - len(
             state.tokenizer(sample.prompt, add_special_tokens=False)["input_ids"]
         )
@@ -88,13 +107,19 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
         sampling_params["max_new_tokens"] >= 0
     ), f"max_new_tokens: {sampling_params['max_new_tokens']} should not be less than 0"
     if sampling_params["max_new_tokens"] == 0:
+<<<<<<< HEAD
         # if exceeds the max_new_tokens, mark the status to truncated and return.
+=======
+>>>>>>> origin/main
         sample.status = Sample.Status.TRUNCATED
         return sample
 
     # Token-based mode: use tokens directly
     if len(sample.response) > 0:
+<<<<<<< HEAD
         # we got the input tokens from the previous turn, set them as input
+=======
+>>>>>>> origin/main
         input_token_ids = sample.tokens
     else:
         # First turn: initialize with prompt tokens
@@ -112,6 +137,10 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     }
 
     output = await post(url, payload, use_http2=args.use_http2)
+<<<<<<< HEAD
+=======
+
+>>>>>>> origin/main
     # Extract new response tokens
     if "output_token_logprobs" in output["meta_info"]:
         new_response_tokens = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
@@ -125,6 +154,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     sample.tokens = sample.tokens + new_response_tokens
     sample.response_length += len(new_response_tokens)
     sample.response += output["text"]
+<<<<<<< HEAD
     sample.weight_versions.append(output["meta_info"]["weight_version"])
     if sample.rollout_log_probs is None:
         sample.rollout_log_probs = []
@@ -134,6 +164,14 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
     # 1. truncated
     # 2. aborted
     # 3. completed
+=======
+    if "weight_version" in output["meta_info"]:
+        sample.weight_versions.append(output["meta_info"]["weight_version"])
+    if sample.rollout_log_probs is None:
+        sample.rollout_log_probs = []
+    sample.rollout_log_probs += new_response_log_probs
+
+>>>>>>> origin/main
     match output["meta_info"]["finish_reason"]["type"]:
         case "length":
             sample.status = Sample.Status.TRUNCATED
@@ -146,6 +184,7 @@ async def generate(args, sample: Sample, sampling_params) -> Sample:
 
 
 async def generate_and_rm(args, sample: Sample, sampling_params: dict, evaluation=False) -> Sample:
+<<<<<<< HEAD
     """Generate response and possibly apply reward, if the sample is completed
     or truncated, return directly, else generate with semaphore, if there is 
     an abort signal, return directly. For group rm, return directly, rm will happen elsewhere.
@@ -164,16 +203,27 @@ async def generate_and_rm(args, sample: Sample, sampling_params: dict, evaluatio
     if sample.status == Sample.Status.COMPLETED or sample.status == Sample.Status.TRUNCATED:
         assert sample.response is not None
         if not args.group_rm:  # group_rm: reward that needs the whole group
+=======
+    # For samples with existing response, check if they're complete
+    if sample.status == Sample.Status.COMPLETED or sample.status == Sample.Status.TRUNCATED:
+        assert sample.response is not None
+        if not args.group_rm:
+>>>>>>> origin/main
             assert sample.reward is not None
         return sample
 
     state = GenerateState(args)
 
     # generate
+<<<<<<< HEAD
     # Concurrency throttle: only a bounded number of 
     # coroutines enter this block at once. Prevents GPU/CPU overload.
     async with state.semaphore:
         if state.aborted:  # abort signal from state
+=======
+    async with state.semaphore:
+        if state.aborted:
+>>>>>>> origin/main
             sample.status = Sample.Status.ABORTED
             return sample
 
@@ -199,7 +249,11 @@ async def generate_and_rm(args, sample: Sample, sampling_params: dict, evaluatio
         for sample, reward in zip(samples_need_reward, rewards):
             sample.reward = reward
         return samples
+<<<<<<< HEAD
     else:  # Do not reward aborted samples
+=======
+    else:
+>>>>>>> origin/main
         if sample.status == Sample.Status.ABORTED:
             return sample
 
@@ -237,7 +291,11 @@ async def abort(args, rollout_id: int):
         f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers", use_http2=args.use_http2
     )
 
+<<<<<<< HEAD
     # abort all the requests, send abort signal to all the workers
+=======
+    # abort all the requests
+>>>>>>> origin/main
     for url in response["urls"]:
         print(f"Abort request for {url}", flush=True)
         await post(f"{url}/abort_request", {"abort_all": True}, use_http2=False)
@@ -246,7 +304,11 @@ async def abort(args, rollout_id: int):
     count = 0
     while state.pendings:
         done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+<<<<<<< HEAD
         # collect unfinished rollout only if args.partial_rollout is True
+=======
+
+>>>>>>> origin/main
         if not args.partial_rollout:
             continue
 
@@ -291,6 +353,7 @@ async def generate_rollout_async(args, rollout_id: int, data_source) -> list[lis
     data = []
     do_print = True
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
+<<<<<<< HEAD
     # Using while because there is a dynamic filtering process, so if some batches are discarded
     # we need to keep generating samples until we get enough valid samples, also, we only wait 
     # for one task to finish, so until we fill up the data list, we continue this loop.
@@ -311,6 +374,19 @@ async def generate_rollout_async(args, rollout_id: int, data_source) -> list[lis
         for task in done:
             group: list[Sample] = task.result()
             # log the first rollout
+=======
+    while len(data) < target_data_size:
+        while state.remaining_batch_size < target_data_size:
+            # get samples from the buffer and submit the generation requests.
+            samples = data_source(args.over_sampling_batch_size)
+            state.submit_generate_tasks(samples)
+
+        # wait for the generation to finish
+        done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            group: list[Sample] = task.result()
+
+>>>>>>> origin/main
             if do_print:
                 sample = group[0][0] if isinstance(group[0], list) else group[0]
                 print(
@@ -320,8 +396,11 @@ async def generate_rollout_async(args, rollout_id: int, data_source) -> list[lis
                 do_print = False
 
             assert len(group) == args.n_samples_per_prompt
+<<<<<<< HEAD
             # dynamic filter to evaluate this group, if this group doesn't satisfy
             # the filter, we discard this batch and continue.
+=======
+>>>>>>> origin/main
             if dynamic_filter is not None and not dynamic_filter(args, group):
                 state.remaining_batch_size -= 1
                 continue
@@ -333,7 +412,10 @@ async def generate_rollout_async(args, rollout_id: int, data_source) -> list[lis
                 pbar.update(args.n_samples_per_prompt)
 
     pbar.close()
+<<<<<<< HEAD
     # log the last rollout
+=======
+>>>>>>> origin/main
     sample = data[-1][0][0] if isinstance(data[-1][0], list) else data[-1][0]
     print(
         f"Finish rollout: {[sample.prompt + sample.response]}, label: {sample.label}, reward: {sample.reward}",
@@ -464,7 +546,10 @@ def generate_rollout(args, rollout_id, data_buffer, evaluation=False):
     completed_samples, aborted_samples = generate_abortable_samples(
         args, rollout_id, data_buffer.get_samples, evaluation=evaluation
     )
+<<<<<<< HEAD
     # aborted samples are added to the buffer
+=======
+>>>>>>> origin/main
     data_buffer.add_samples(aborted_samples)
     return completed_samples
 

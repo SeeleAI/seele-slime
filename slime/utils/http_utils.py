@@ -9,7 +9,11 @@ import httpx
 SLIME_HOST_IP_ENV = "SLIME_HOST_IP"
 
 
+<<<<<<< HEAD
 def find_available_port(base_port: int):  # get a random port and iteratively find available port
+=======
+def find_available_port(base_port: int):
+>>>>>>> origin/main
     port = base_port + random.randint(100, 1000)
     while True:
         if is_port_available(port):
