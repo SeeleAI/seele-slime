@@ -1,0 +1,28 @@
+Metadata-Version: 2.4
+Name: slime
+Version: 0.0.1
+Author: slime Team
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Environment :: GPU :: NVIDIA CUDA
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Classifier: Topic :: System :: Distributed Computing
+Requires-Python: >=3.10
+License-File: LICENSE
+Requires-Dist: accelerate
+Requires-Dist: datasets
+Requires-Dist: httpx[http2]
+Requires-Dist: mcp[cli]
+Requires-Dist: pylatexenc
+Requires-Dist: pyyaml
+Requires-Dist: ray[default]
+Requires-Dist: sglang
+Requires-Dist: torch
+Requires-Dist: transformers
+Requires-Dist: wandb
+Dynamic: author
+Dynamic: classifier
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
