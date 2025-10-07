@@ -24,7 +24,7 @@ training:
 import logging
 from pathlib import Path
 from time import time
-from typing import Union, List
+from typing import Union, List, Optional
 from collections import defaultdict
 
 import ray
@@ -37,6 +37,8 @@ from agent.base.protocal import MySample
 from slime.utils.wandb_utils import init_wandb_secondary
 from agent.gym_rollout_datasource import GymRolloutDataSource
 from slime.rollout.sglang_rollout import GenerateState
+from agent.rollout_producer_consumer import RolloutProducer, RolloutConsumer
+from agent.gym_rollout import create_rollout_producer, create_rollout_consumer, shutdown_global_producer
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -62,6 +64,12 @@ class GymRolloutController:
         # default is: slime.rollout.sglang_rollout.generate_rollout
         print(f"import {self.args.rollout_function_path} as generate_rollout function.")
         print(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
+        
+        # 异步生产者-消费者模式
+        self.producer: Optional[RolloutProducer] = None
+        self.consumer: Optional[RolloutConsumer] = None
+        
+        print("RolloutController initialized with async producer-consumer mode")
 
     def get_num_rollout_per_epoch(self):
         """
@@ -90,9 +98,46 @@ class GymRolloutController:
         
         return num_rollout_per_epoch
 
-    def generate(self, rollout_id):
+    async def start_producer(self):
+        """启动生产者（异步方法）"""
+        if self.producer is None:
+            self.producer = await create_rollout_producer(self.args, self.data_source)
+            print("Producer started in RolloutController")
+            
+    async def create_consumer(self) -> RolloutConsumer:
+        """创建消费者（异步方法），支持预填充机制"""
+        self.consumer = await create_rollout_consumer(self.args)
+        print("Consumer created and queue pre-filled in RolloutController")
+        return self.consumer
+            
+    async def stop_producer(self):
+        """停止生产者（异步方法）"""
+        if self.producer:
+            await shutdown_global_producer()
+            self.producer = None
+            print("Producer stopped in RolloutController")
+    
+    async def drain_remaining_data(self) -> List[MySample]:
         """
-        生成rollout数据
+        清空队列中剩余的数据，确保没有数据浪费
+        在训练结束后调用
+        
+        Returns:
+            List[MySample]: 剩余的所有数据
+        """
+        if self.consumer is None:
+            print("No consumer available to drain remaining data")
+            return []
+        
+        print("Draining remaining data from queue...")
+        remaining_data = await self.consumer.drain_remaining_data()
+        print(f"Drained {len(remaining_data)} remaining samples")
+        return remaining_data
+
+    async def generate(self, rollout_id):
+        """
+        生成rollout数据 
+        直接从预填充的队列获取数据，训练循环不会被数据生成速度限制
         """
         self.rollout_id = rollout_id
         start_time = time()
@@ -103,14 +148,28 @@ class GymRolloutController:
             )["samples"]
             data = [MySample.from_dict(sample) for sample in data]
         else:
-            # 生成数据，现在直接返回List[Sample]
-            data = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+            # 从预填充队列立即获取数据
+            if self.consumer is None:
+                raise RuntimeError(
+                    "Consumer not initialized. "
+                    "Call start_producer() and create_consumer() before training."
+                )
             
-            # 不再需要flatten，因为已经是List[Sample]
+            # 非阻塞获取预生成的数据
+            print(f"Rollout {rollout_id}: fetching batch from pre-filled queue")
+            data = await self.consumer.get_batch(self.args.global_batch_size)
             
-            # 确保数据量是global_batch_size
-            if len(data) != self.args.global_batch_size:
-                print(f"Warning: expected {self.args.global_batch_size} samples, got {len(data)}")
+            if not data:
+                raise RuntimeError(
+                    "No data available from consumer. "
+                    "Producer may have finished or queue is empty. "
+                    "Check producer status and queue size."
+                )
+            
+            # 数据量检查（允许最后一批数据量不足）
+            if len(data) < self.args.global_batch_size:
+                print(f"Warning: got {len(data)} samples (expected {self.args.global_batch_size}), "
+                      f"this may be the last batch")
 
         # 保存debug数据
         if (path_template := self.args.save_debug_rollout_data) is not None:

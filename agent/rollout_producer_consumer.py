@@ -250,7 +250,7 @@ class RolloutConsumer:
                     print("   - This demonstrates async decoupling: training continues with available data")
                     break
                 else:
-                    # 🔄 完全没有数据，短暂等待但不长时间阻塞
+                    #  完全没有数据，短暂等待但不长时间阻塞
                     print("Consumer: no data available, brief wait...")
                     await asyncio.sleep(0.1)  # 很短的等待时间
                     

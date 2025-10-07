@@ -44,38 +44,58 @@ def train(args):
     # always update weight first so that sglang has the loaded weights from training.
     ray.get(actor_model.async_update_weights())
 
-    # async train loop.
-    rollout_data_next_future = rollout_manager.async_generate(args.start_rollout_id)
+    # 1. 启动生产者（训练开始前，持续后台生产）
+    ray.get(rollout_manager.start_producer.remote())
+
+    ray.get(rollout_manager.create_consumer.remote())
+
+
+    # 真正异步解耦的训练循环
+    # 使用流水线模式，但避免阻塞等待数据生成
+    pending_train_futures = []
+    pending_generate_futures = {}
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
-        # Sync the last generation
-        if rollout_data_next_future is not None:
-            rollout_data_curr_ref = ray.get(rollout_data_next_future)
+        print(f"\n--- Rollout {rollout_id}/{args.num_rollout} ---")
+        
+        # 真正异步解耦：立即获取预生成数据，不等待
+        print(f"从预填充队列获取rollout数据 {rollout_id}...")
+        rollout_data_ref = rollout_manager.async_generate(rollout_id)
+        
+        # 异步训练，不阻塞循环
+        print(f"开始异步训练 {rollout_id}...")
+        train_future = actor_model.async_train(rollout_id, rollout_data_ref)
+        pending_train_futures.append(train_future)
 
-        # Start the next rollout early.
-        if rollout_id + 1 < args.num_rollout:
-            rollout_data_next_future = rollout_manager.async_generate(rollout_id + 1)
-
-        ray.get(actor_model.async_train(rollout_id, rollout_data_curr_ref))
+        # 等待当前训练完成（避免内存积累）
+        ray.get(train_future)
 
         if args.save_interval is not None and (
             (rollout_id + 1) % args.save_interval == 0
             or (num_rollout_per_epoch is not None and (rollout_id + 1) % num_rollout_per_epoch == 0)
         ):
+            print(f"保存模型 {rollout_id}...")
             ray.get(actor_model.async_save_model(rollout_id))
             if args.rollout_global_dataset:
                 ray.get(rollout_manager.controller.save.remote(rollout_id))
 
         if (rollout_id + 1) % args.update_weights_interval == 0:
-            # sync generate before update weights to prevent update weight in the middle of generation
-            rollout_data_curr_ref = ray.get(rollout_data_next_future)
-            rollout_data_next_future = None
+            print(f"更新权重 {rollout_id}...")
             ray.get(actor_model.async_update_weights())
 
         if args.eval_interval is not None and (
             (rollout_id + 1) % args.eval_interval == 0
             or (num_rollout_per_epoch is not None and (rollout_id + 1) % num_rollout_per_epoch == 0)
         ):
-            ray.get(rollout_manager.async_eval(rollout_id))
+            print(f"评估 {rollout_id}...")
+            eval_future = rollout_manager.async_eval(rollout_id)
+            ray.get(eval_future)  # Eval can be blocking as it's infrequent
+
+    # 清理剩余数据（确保没有数据浪费）
+    remaining_data = ray.get(rollout_manager.drain_remaining_data.remote())
+    
+    # 停止生产者（训练结束后）
+    ray.get(rollout_manager.stop_producer.remote())
+
 
 
 if __name__ == "__main__":

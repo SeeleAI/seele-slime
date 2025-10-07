@@ -166,6 +166,15 @@ def _start_router(args):
 
 
 class RolloutManager:
+    """
+    Rollout管理器，负责协调数据生成和训练
+    
+    实现真正的异步解耦：
+    1. 生产者在训练开始前启动，持续在后台生成数据
+    2. 消费者在训练循环中创建，从预填充队列获取数据
+    3. 训练循环不会被数据生成速度限制
+    """
+    
     def __init__(self, args, pg, wandb_run_id):
         self.args = args
         _start_router(args)
@@ -173,25 +182,77 @@ class RolloutManager:
             num_cpus=1,
             num_gpus=0,
         ).remote(args, wandb_run_id=wandb_run_id)
-        # self.controller = RolloutController.options(
-        #     num_cpus=1,
-        #     num_gpus=0,
-        # ).remote(args, wandb_run_id=wandb_run_id)
 
         self.all_rollout_engines = create_rollout_engines(args, pg)
         nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         # when doing multi-node serving, we will only send request to node-0 for each engine.
         self.rollout_engines = self.all_rollout_engines[::nodes_per_engine]
-        # A lock is used to prevent race conditions. When multiple parts of your 
-        # application try to access a shared resource at the same time (like picking 
-        # an available engine from the self.rollout_engines list), a lock ensures 
+        # A lock is used to prevent race conditions. When multiple parts of your
+        # application try to access a shared resource at the same time (like picking
+        # an available engine from the self.rollout_engines list), a lock ensures
         # that only one operation can proceed at a time.
         self.rollout_engine_lock = Lock.options(
             num_cpus=1,
             num_gpus=0,
         ).remote()
+        
+        self.producer_started = False
+        print("RolloutManager initialized with async producer-consumer mode (only mode)")
+
+    async def start_producer(self):
+        """
+        启动生产者，在训练开始前调用
+        生产者将持续在后台生成数据，填充队列
+        """
+        if not self.producer_started:
+            await self.controller.start_producer.remote()
+            self.producer_started = True
+            print("RolloutManager: Producer started, continuously generating data in background")
+            
+    async def create_consumer(self):
+        """
+        创建消费者，在训练循环开始前调用
+        消费者会等待队列预填充后返回，确保训练开始时就有足够数据
+        """
+        consumer = await self.controller.create_consumer.remote()
+        print("RolloutManager: Consumer created with pre-filled queue")
+        return consumer
+        
+    async def stop_producer(self):
+        """
+        停止生产者，在训练结束后调用
+        """
+        if self.producer_started:
+            await self.controller.stop_producer.remote()
+            self.producer_started = False
+            print("RolloutManager: Producer stopped")
+    
+    async def drain_remaining_data(self):
+        """
+        清空队列中剩余的数据，确保没有数据浪费
+        在训练结束后调用
+        
+        Returns:
+            List[MySample]: 剩余的所有数据
+        """
+        print("RolloutManager: draining remaining data...")
+        remaining_data = await self.controller.drain_remaining_data.remote()
+        print(f"RolloutManager: drained {len(remaining_data)} remaining samples")
+        return remaining_data
 
     def async_generate(self, rollout_id):
+        """
+        生成rollout数据 - 真正的异步解耦模式
+        
+        从预填充队列立即获取数据，训练循环不会被数据生成速度限制
+        生产者持续在后台生成数据，消费者从队列获取预生成数据
+        
+        Args:
+            rollout_id: rollout ID
+            
+        Returns:
+            Ray ObjectRef: 包含生成数据的引用
+        """
         return self.controller.generate.remote(rollout_id)
 
     def async_eval(self, rollout_id):

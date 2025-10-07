@@ -2,7 +2,7 @@ import asyncio
 import copy
 import time
 import torch
-from typing import List
+from typing import List, Optional
 import uuid
 from slime.rollout.sglang_rollout import GenerateState
 from slime.utils.http_utils import post
@@ -12,8 +12,9 @@ from tqdm import tqdm
 from agent.base.env import Env
 from agent.utils import get_env
 from agent.gym_rollout_datasource import GymRolloutDataSource
+from agent.rollout_producer_consumer import RolloutProducer, RolloutConsumer
 
-__all__ = ["generate_rollout"]
+__all__ = ["generate_rollout", "create_rollout_producer", "create_rollout_consumer", "shutdown_global_producer"]
 
 # Lynx: Qwen3 sometimes generate this, which is not the instruction-tuned EOS token
 DUMMY_EOS_TOKENS = ["<|endoftext|>"]
@@ -408,76 +409,104 @@ async def agent_loop_generate(
 
 
 
-async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[MySample]:
+# ============================================================================
+# 全局生产者-消费者管理
+# ============================================================================
+# 使用全局变量管理生产者和队列，确保整个训练过程中只有一个生产者实例
+# 生产者在后台持续运行，不依赖于单个rollout的生命周期
+
+_global_producer: Optional[RolloutProducer] = None
+_global_queue: Optional[asyncio.Queue] = None
+
+
+async def create_rollout_producer(args, data_source: GymRolloutDataSource) -> RolloutProducer:
     """
-    异步生成rollout数据，返回List[Sample]
-    """
-    state = GenerateState(args)
-    target_size = args.global_batch_size
-    # 持续生成直到step_buffer有足够数据
-    while data_source.get_step_buffer_length() < target_size:
-        # get just one sample, but this sample is repeated for n_samples_per_prompt times
-        # for group generation. Note that, the original buffer in SLIME is useless.
-        prompt_groups = data_source.get_samples(1)
-        if not prompt_groups:
-            print("No more prompts available")
-            break
-        
-        prompt_group = prompt_groups[0]  # [Sample1, Sample2, ...] (n_samples_per_prompt个)
-        
-        # 为这个prompt group生成一个唯一ID
-        prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
-        
-        # Note that this loop submits only one group
-        tasks = []
-        for i, prompt_sample in enumerate(prompt_group):
-            trajectory_id = f"{prompt_group_id}_traj_{i}"
-            
-            # task = generate_trajectory_as_samples(
-            #     args,
-            #     prompt_sample,
-            #     trajectory_id=trajectory_id,
-            #     prompt_group_id=prompt_group_id,
-            #     sampling_params=state.sampling_params.copy()
-            # )
-            task = agent_loop_generate(
-                args,
-                prompt_sample,
-                trajectory_id=trajectory_id,
-                prompt_group_id=prompt_group_id,
-                sampling_params=state.sampling_params.copy()
-            )
-            tasks.append(task)
-        
-        # 等待所有trajectories完成
-        trajectory_results = await asyncio.gather(*tasks)
-        # trajectory_results: List[List[Sample]], one group in GRPO
-        # The first List is N trajectories, the second List represents
-        # possible swap out
-        # Compute group advantage right here
-        advs = compute_group_advantages(trajectory_results, args)
-        for samples, adv in zip(trajectory_results, advs):
-            for samp in samples:
-                samp.advantage = adv
-        
-        # flatten all trajectories
-        all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
-        
-        # 将生成的steps放入buffer
-        if all_steps:
-            data_source.add_steps_to_buffer(all_steps)
-        
-        print(f"Generated {len(all_steps)} steps from {len(prompt_group)} trajectories, "
-              f"buffer size: {data_source.get_step_buffer_length()}")
+    创建并启动全局rollout生产者
+    支持真正的异步解耦：大容量队列 + 持续后台生产
     
-    # 从buffer取出需要的数量
-    return data_source.get_steps_from_buffer(target_size) #需要改成分布式队列
+    Args:
+        args: 配置参数
+        data_source: 数据源
+        
+    Returns:
+        RolloutProducer: 生产者实例
+    """
+    global _global_producer, _global_queue
+    
+    if _global_producer is not None:
+        print("Global producer already exists, returning existing instance")
+        return _global_producer
+        
+    # 创建大容量队列，支持10个批次的缓冲
+    max_queue_size = args.global_batch_size * 10
+    _global_queue = asyncio.Queue(maxsize=max_queue_size)
+    
+    # 创建并启动生产者
+    _global_producer = RolloutProducer(args, _global_queue, data_source)
+    await _global_producer.start()
+    
+    print(f"Global rollout producer created with queue size: {max_queue_size}")
+    print(f"Producer will continuously generate data in background")
+    return _global_producer
+
+
+async def create_rollout_consumer(args) -> RolloutConsumer:
+    """
+    创建rollout消费者
+    支持真正的异步解耦：非阻塞获取 + 预填充机制
+    
+    Args:
+        args: 配置参数
+        
+    Returns:
+        RolloutConsumer: 消费者实例
+    """
+    global _global_queue
+    
+    if _global_queue is None:
+        raise RuntimeError("Global queue not initialized, call create_rollout_producer first")
+        
+    consumer = RolloutConsumer(_global_queue, args)
+    
+    # 等待队列预填充，确保训练开始时就有足够数据
+    await consumer.ensure_queue_ready()
+    
+    return consumer
+
+
+async def shutdown_global_producer():
+    """关闭全局生产者"""
+    global _global_producer
+    
+    if _global_producer:
+        await _global_producer.stop()
+        _global_producer = None
+        print("Global producer shutdown")
+
+# ============================================================================
+# GRPO优势计算
+# ============================================================================
 
 def compute_group_advantages(
     samples: List[List[MySample]],
     args
 ):
-    """Calculates only one group of advantages"""
+    """
+    计算一个prompt group内所有trajectories的GRPO优势值
+    
+    GRPO (Group Relative Policy Optimization) 算法：
+    - 对同一个prompt的多个响应进行组内对比
+    - advantage = reward - mean(group_rewards)
+    - 正值：比平均好，应该增强
+    - 负值：比平均差，应该抑制
+    
+    Args:
+        samples: List[List[MySample]] - 每个trajectory可能有多个steps（swap out）
+        args: 配置参数
+        
+    Returns:
+        List[float]: 每个trajectory的优势值
+    """
     # Although swap out gives us more samples, they have identical rewards
     # and we only need one of them as representative.
     raw_rewards = [sample[0].reward for sample in samples]
@@ -503,7 +532,10 @@ def compute_prompt_group_advantages(
     args
 ) -> List[MySample]:
     """
-    计算一个prompt group内所有trajectories的advantages
+    计算一个prompt group内所有trajectories的advantages（备用函数）
+    
+    注意：这个函数目前未被使用，保留用于可能的future扩展
+    主要使用的是 compute_group_advantages()
     """
     import torch
     
@@ -547,30 +579,42 @@ def compute_prompt_group_advantages(
     return all_steps
 
 
-def generate_rollout(args, rollout_id, data_source: GymRolloutDataSource, evaluation=False):
+def generate_rollout(args, rollout_id, data_source: GymRolloutDataSource, evaluation=False, consumer=None):
     """
-    生成rollout数据的入口函数，保持原有接口
+    生成rollout数据的入口函数（向后兼容接口）
+    
+    注意：训练模式已废弃，请使用生产者-消费者模式
     
     Args:
         args: 配置参数
         rollout_id: rollout ID
-        data_source: 数据源
+        data_source: 数据源（训练模式已废弃）
         evaluation: 是否为评估模式
+        consumer: 消费者实例（训练模式已废弃）
         
     Returns:
-        List[List[Sample]]: 原有格式的samples
+        List[MySample]: 生成的samples
     """
     if evaluation:
-        # 添加评估方式
+        # 评估模式：使用独立的实现
         return run(eval_rollout(args, rollout_id))
-    
-    # 训练模式：生成steps
-    return run(generate_rollout_async(args, rollout_id, data_source))
+    else:
+        # 训练模式已废弃
+        raise RuntimeError(
+            "Training mode is deprecated in generate_rollout(). "
+            "The system now uses producer-consumer pattern. "
+            "Data generation is handled by RolloutProducer in background, "
+            "and GymRolloutController.generate() fetches data from queue directly."
+        )
 
 
-# 在 gym_rollout.py 中添加
+# ============================================================================
+# 评估（Evaluation）相关函数
+# ============================================================================
+# 评估模式不使用生产者-消费者，而是直接生成数据
+# 因为评估不需要训练，不需要异步解耦
 
-# 全局变量存储eval数据集
+# 全局变量存储eval数据集（缓存）
 EVAL_PROMPT_DATASET = {}
 
 async def eval_rollout(args, rollout_id):
