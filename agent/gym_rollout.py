@@ -453,7 +453,10 @@ async def create_rollout_producer(args, data_source: GymRolloutDataSource) -> Ro
 async def create_rollout_consumer(args) -> RolloutConsumer:
     """
     创建rollout消费者
-    支持真正的异步解耦：非阻塞获取 + 预填充机制
+    支持异步解耦：阻塞式获取 + 预填充机制
+    - 使用阻塞式 get，队列空时协程挂起（不消耗 CPU）
+    - 总是返回完整批次，保证数据一致性
+    - 预填充确保训练开始时不等待
     
     Args:
         args: 配置参数

@@ -136,8 +136,10 @@ class GymRolloutController:
 
     async def generate(self, rollout_id):
         """
-        生成rollout数据 
-        直接从预填充的队列获取数据，训练循环不会被数据生成速度限制
+        生成rollout数据
+        - 使用阻塞式获取，确保返回完整批次
+        - 预填充机制确保训练开始时不等待
+        - 队列空时协程挂起，不消耗 CPU
         """
         self.rollout_id = rollout_id
         start_time = time()
@@ -155,21 +157,25 @@ class GymRolloutController:
                     "Call start_producer() and create_consumer() before training."
                 )
             
-            # 非阻塞获取预生成的数据
-            print(f"Rollout {rollout_id}: fetching batch from pre-filled queue")
+            # 阻塞式获取完整批次（队列空时等待，不消耗 CPU）
+            print(f"Rollout {rollout_id}: fetching batch from queue")
             data = await self.consumer.get_batch(self.args.global_batch_size)
             
+            # 改进后的 get_batch 总是返回完整批次（除非遇到结束信号）
             if not data:
                 raise RuntimeError(
                     "No data available from consumer. "
-                    "Producer may have finished or queue is empty. "
-                    "Check producer status and queue size."
+                    "Producer has finished and no more data available."
                 )
             
-            # 数据量检查（允许最后一批数据量不足）
+            # 数据量检查（只有遇到结束信号时才会不足）
             if len(data) < self.args.global_batch_size:
-                print(f"Warning: got {len(data)} samples (expected {self.args.global_batch_size}), "
-                      f"this may be the last batch")
+                if self.consumer.is_finished:
+                    print(f"Info: got {len(data)} samples (last batch, producer finished)")
+                else:
+                    # 这不应该发生，因为 get_batch 会阻塞等待完整批次
+                    print(f"Warning: got {len(data)} samples but producer not finished, "
+                          f"this should not happen with blocking get_batch")
 
         # 保存debug数据
         if (path_template := self.args.save_debug_rollout_data) is not None:
