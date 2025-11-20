@@ -8,6 +8,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from slime.backends.sglang_utils.sglang_engine import SGLangEngine
 from slime.ray.buffer import RolloutController
+from agent.gym_rollout_controller import GymRolloutController
 from slime.utils.http_utils import find_available_port, get_host_info, run_router
 
 from .utils import NOSET_VISIBLE_DEVICES_ENV_VARS_LIST, Lock
@@ -105,7 +106,7 @@ def create_rollout_engines(args, pg):
         for key in ["port", "nccl_port", "dist_init_addr"]:
             assert key in addr_and_ports[i], f"Engine {i} {key} is not set."
         print(f"Ports for engine {i}: {addr_and_ports[i]}")
-
+    # here, we init all rollout engines
     # TODO: don't ray.get here to overlap train actor init with rollout engine init.
     # somehow if we don't sync here, the --debug-rollout-only mode will crash.
     init_handles = [engine.init.remote(**ports) for engine, ports in zip(rollout_engines, addr_and_ports)]
@@ -117,7 +118,14 @@ def create_rollout_engines(args, pg):
     return rollout_engines
 
 
+
 def _start_router(args):
+    """Start the SGLang router. This method first gets the host IP,
+    then randomly select a available port
+
+    Args:
+        args (_type_): _description_
+    """
     if args.sglang_router_ip is not None:
         return
 
@@ -138,11 +146,15 @@ def _start_router(args):
 
     if hasattr(router_args, "request_timeout_secs"):
         router_args.request_timeout_secs = args.sglang_router_request_timeout_secs
-
+        
+    # start router process and run it in a separate process
     process = multiprocessing.Process(
         target=run_router,
         args=(router_args,),
     )
+    # a daemon process is a child process that automatically 
+    # terminates when the main (parent) process ends, 
+    # regardless of whether it has completed its task.
     process.daemon = True  # Set the process as a daemon
     process.start()
     # Wait 3 seconds
@@ -156,15 +168,23 @@ class RolloutManager:
     def __init__(self, args, pg, wandb_run_id):
         self.args = args
         _start_router(args)
-        self.controller = RolloutController.options(
+        self.controller = GymRolloutController.options(
             num_cpus=1,
             num_gpus=0,
         ).remote(args, wandb_run_id=wandb_run_id)
+        # self.controller = RolloutController.options(
+        #     num_cpus=1,
+        #     num_gpus=0,
+        # ).remote(args, wandb_run_id=wandb_run_id)
 
         self.all_rollout_engines = create_rollout_engines(args, pg)
         nodes_per_engine = max(1, args.rollout_num_gpus_per_engine // args.num_gpus_per_node)
         # when doing multi-node serving, we will only send request to node-0 for each engine.
         self.rollout_engines = self.all_rollout_engines[::nodes_per_engine]
+        # A lock is used to prevent race conditions. When multiple parts of your 
+        # application try to access a shared resource at the same time (like picking 
+        # an available engine from the self.rollout_engines list), a lock ensures 
+        # that only one operation can proceed at a time.
         self.rollout_engine_lock = Lock.options(
             num_cpus=1,
             num_gpus=0,

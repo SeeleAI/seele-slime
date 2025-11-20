@@ -13,15 +13,15 @@ from megatron.core import mpu
 from transformers import AutoConfig, AutoTokenizer
 
 from slime.ray.train_actor import TrainRayActor
-from slime.utils.data import process_rollout_data
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.memory_utils import clear_memory, print_memory
 from slime.utils.timer import Timer, timer
 from slime.utils.wandb_utils import init_wandb_secondary
 
+from ..utils.data import get_data_iterator, process_rollout_data
 from .checkpoint import load_checkpoint
 from .cp_utils import slice_log_prob_with_cp
-from .data import get_data_iterator, log_perf_data, log_rollout_data
+from .data import log_perf_data, log_rollout_data
 from .initialize import init, is_megatron_main_rank
 from .loss import compute_advantages_and_returns
 from .model import forward_only, initialize_model_and_optimizer, save, train
@@ -31,7 +31,7 @@ from .update_weight_utils import UpdateWeightFromDistributed, UpdateWeightFromTe
 class MegatronTrainRayActor(TrainRayActor):
     def init(self, args, role, wandb_run_id, with_ref=False):
         super().init(args, role, wandb_run_id, with_ref)
-
+        # here it initialize torch distributed
         init(args)
 
         if is_megatron_main_rank():
@@ -260,6 +260,10 @@ class MegatronTrainRayActor(TrainRayActor):
                 # Calculate adv and returns. Need to performed before training (instead of on the fly),
                 # because we may need normalize the whole rollout.
                 compute_advantages_and_returns(self.args, rollout_data)
+                # print("rewards", rollout_data["rewards"][0])
+                # print("adv", rollout_data["advantages"][0])
+                # print("returns", rollout_data["returns"][0])
+                # exit(0)
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)

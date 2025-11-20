@@ -58,6 +58,14 @@ class TrainRayActor(RayActor):
         torch.cuda.set_device(f"cuda:{args.local_rank}")
 
         try:
+            """
+            On large servers with multiple CPU sockets, a GPU is 
+            physically wired to be "closer" to one CPU than another 
+            (this is called NUMA, or Non-Uniform Memory Access). This command 
+            tells the system to make this Python process (and its GPU) prefer 
+            using the CPU cores that are physically closest to it. This reduces 
+            latency when moving data between the CPU and GPU, which can speed up data loading.
+            """
             import pynvml
 
             pynvml.nvmlInit()

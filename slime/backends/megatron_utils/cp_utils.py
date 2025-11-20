@@ -16,6 +16,7 @@ def get_logits_and_tokens_offset_with_cp(
     assert cp_size > 1
 
     prompt_length = total_length - response_length
+    # ceil(total_length / 2 * cp_size)
     chunk_size = (total_length + 2 * cp_size - 1) // (2 * cp_size)
 
     # the offset of 2 chunks
@@ -23,6 +24,7 @@ def get_logits_and_tokens_offset_with_cp(
     chunk_1 = ((2 * cp_size - cp_rank - 1) * chunk_size, (2 * cp_size - cp_rank) * chunk_size)
 
     # the offset of 2 logits, note that the logits need a "-1".
+    # max to ignore the prompt part, min to prevent we exceed the total length.
     logits_0 = (max(chunk_0[0], prompt_length - 1), min(chunk_0[1], total_length - 1))
     logits_1 = (max(chunk_1[0], prompt_length - 1), min(chunk_1[1], total_length - 1))
 

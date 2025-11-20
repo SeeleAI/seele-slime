@@ -12,6 +12,10 @@ def load_function(path):
     return getattr(module, attr)
 
 
+
+# ensures that only one instance of a class can ever be created. 
+# Any attempt to create a new instance will simply return the 
+# already existing instance
 class SingletonMeta(type):
     """
     A metaclass for creating singleton classes.

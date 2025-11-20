@@ -26,24 +26,30 @@ except:
 
 
 def all_gather_param(name, param):
+    # No partition on expert bias
     if "expert_bias" in name:
         return param
-
+    
+    # no TP or parallel mode, return the data of the param
     assert hasattr(param, "tensor_model_parallel"), f"{name} does not have tensor_model_parallel attribute"
     if not param.tensor_model_parallel or getattr(param, "parallel_mode", None) == "duplicated":
         return param.data
-
+    
+    # for MoE models, get expert + TP group, else get TP group
     if ".experts." in name:
         tp_size = mpu.get_expert_tensor_parallel_world_size()
         tp_group = mpu.get_expert_tensor_parallel_group()
     else:
         tp_size = mpu.get_tensor_model_parallel_world_size()
         tp_group = mpu.get_tensor_model_parallel_group()
-
+        
+    # craete container for distributed tensors
     param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
+    # gather all partitions
     dist.all_gather(param_partitions, param.data, group=tp_group)
-    partition_dim = param.partition_dim
+    partition_dim = param.partition_dim  # Row or Column partition
     assert param.partition_stride == 1, "partition_stride != 1 is not supported"
+    # extra hanle for MLP
     # TODO: here we did an extra copy during concat, maybe merge this with convert_to_hf is better?
     # TODO: check only GLU is used.
     if "linear_fc1.weight" in name:
@@ -89,6 +95,7 @@ def all_gather_params_async(param_infos_and_params):
                 tp_group = mpu.get_tensor_model_parallel_group()
 
             param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
+            # async gather by using async_op=True
             handle = dist.all_gather(param_partitions, param.data, group=tp_group, async_op=True)
             gather_tasks.append((info, None, handle, param_partitions, param.partition_dim))
             handles.append(handle)
@@ -507,7 +514,8 @@ class UpdateWeightFromDistributed:
             buffer_size = self._update_weight_from_distributed(
                 name, param, converted_named_tensors, buffer_size, pbar=pbar
             )
-
+            
+        # some parameters remained, send the rest of them to the rollout engine
         if converted_named_tensors:
             self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
 
@@ -537,9 +545,14 @@ class UpdateWeightFromDistributed:
             return
 
         param_size = param.numel() * param.element_size()
+        # when we reach the buffer size, we send the bucket to the model update group
+        # and reset the buffer
         if buffer_size + param_size > self.args.update_weight_buffer_size:
             self._update_bucket_weights_from_distributed(converted_named_tensors, pbar=pbar)
             buffer_size = 0
+            
+        # when we didn't reach the buffer size, we convert the param format and add it to the bucket
+        # Hence this operation sends a bucket of model parameters each time, instead of sending the whole param group.
         converted_named_tensors += convert_to_hf(self.args, self.model_name, name, param, self.quantization_config)
         buffer_size += param_size
         return buffer_size

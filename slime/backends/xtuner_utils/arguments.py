@@ -22,6 +22,11 @@ def parse_args(add_custom_arguments=None):
     parser.add_argument("--evaluate-step", type=int, default=1)
     parser.add_argument("--evaluate-ratio", type=float, default=1)
 
+<<<<<<< HEAD
+    if add_custom_arguments:
+        add_custom_arguments(parser)
+    args = parser.parse_args()
+=======
     parser.add_argument("--sp-size", type=int, default=1)
     parser.add_argument("--ep-size", type=int, default=1)
 
@@ -39,4 +44,5 @@ def parse_args(add_custom_arguments=None):
 
     assert args.sp_size == 1, f"sequence parallel not supported yet."
 
+>>>>>>> origin/main
     return args

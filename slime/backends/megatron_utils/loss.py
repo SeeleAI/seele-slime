@@ -43,6 +43,8 @@ def get_log_probs_and_entropy(
         if cp_size == 1:
             end += total_length
             start = end - response_length
+            # Since recomputation gives us next token predictions, we don't need 
+            # the next token of the EOS token, shift back one position then.
             logits_chunk = logits[start - 1 : end - 1]
             tokens_chunk = tokens[-response_length:]
 
@@ -54,9 +56,15 @@ def get_log_probs_and_entropy(
             chunk_size, chunks_offset, logits_offset, tokens_offset = get_logits_and_tokens_offset_with_cp(
                 total_length, response_length
             )
-
+            # The incoming logits are concatenated with two mirrored sequences, here we split them
             logits_0, logits_1 = logits[end : end + chunk_size], logits[end + chunk_size : end + 2 * chunk_size]
-
+            
+            # Magic code, the purpose is to convert global idx to local idx on this rank.
+            # logits_offset[0][0] - chunks_offset[0][0] is a perform of start idx - start idx. However,
+            # in get_logits_and_tokens_offset_with_cp, we truncate and only want the idx starting after
+            # the prompt, so we can get prompt idx - start idx = offset of prompt idx
+            # As for logits_offset[0][1] - chunks_offset[0][0], it performs start idx - end idx, which 
+            # just calculates the size of the chunk and gives us an end idx for this local array.
             logits_0 = logits_0[logits_offset[0][0] - chunks_offset[0][0] : logits_offset[0][1] - chunks_offset[0][0]]
             tokens_0 = tokens[tokens_offset[0][0] : tokens_offset[0][1]]
 
@@ -159,6 +167,7 @@ def compute_advantages_and_returns(args, rollout_data):
         raise NotImplementedError(f"advantage_estimator {args.advantage_estimator} is not supported. ")
 
     # TODO: OpenRLHF always does advantages normalization but veRL doesn't seem to do it.
+    # normalize_advantages is used solely for REINFORCE++
     if args.normalize_advantages:
         all_advs = torch.cat(advantages)
         cp_size = mpu.get_context_parallel_world_size()
@@ -200,7 +209,8 @@ def compute_advantages_and_returns(args, rollout_data):
             assert (
                 all_advs.size() == all_masks.size()
             ), f"Shape mismatch before whitening: advantages {all_advs.size()}, masks {all_masks.size()}"
-
+            
+            # Swip out will break this, whitening of advantages should be done for unique trajectories
             whitened_advs_flat = distributed_masked_whiten(all_advs, all_masks, shift_mean=True)
             chunk_lengths = [chunk.size(0) for chunk in advantages]
             advantages = list(torch.split(whitened_advs_flat, chunk_lengths))
@@ -215,7 +225,8 @@ def policy_loss_function(args, batch, logits, sum_of_sample_mean):
 
     response_lengths = batch["response_lengths"]
     total_lengths = batch["total_lengths"]
-
+    
+    # Recompute log probs by logits
     log_probs_and_entropy = get_log_probs_and_entropy(
         logits,
         args=args,

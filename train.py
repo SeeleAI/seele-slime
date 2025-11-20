@@ -5,6 +5,13 @@ from slime.ray.placement_group import create_actor_group, create_placement_group
 from slime.utils.arguments import parse_args
 from slime.utils.wandb_utils import init_wandb_primary
 
+# 2000 20 100
+# 2000*8 = 16000 # samples 
+
+# 16000/200 = 80
+#num_samples * num_per_sample / global_batch_size * num_epochs
+
+#
 
 def train(args):
     # allocate the GPUs
@@ -20,14 +27,14 @@ def train(args):
     num_rollout_per_epoch = None
     if args.num_rollout is None:
         num_rollout_per_epoch = ray.get(rollout_manager.controller.get_num_rollout_per_epoch.remote())
-        args.num_rollout = num_rollout_per_epoch * args.num_epoch
+        args.num_rollout = num_rollout_per_epoch * args.num_epoch #只能估算了
     assert args.num_rollout > 0
 
     # sync the initialization (model initalization, load checkpoint, etc.)
     start_rollout_ids = ray.get(
         actor_model.async_init(args, role="actor", with_ref=args.kl_coef != 0 or args.use_kl_loss)
     )
-    assert len(set(start_rollout_ids)) == 1
+    assert len(set(start_rollout_ids)) == 1  # assert all workers have the same start rollout id
     if args.start_rollout_id is None:
         args.start_rollout_id = start_rollout_ids[0]
 
@@ -53,7 +60,7 @@ def train(args):
         if args.eval_interval is not None and rollout_id == 0:
             ray.get(rollout_manager.async_eval(rollout_id))
 
-        rollout_data_ref = ray.get(rollout_manager.async_generate(rollout_id))
+        rollout_data_ref = ray.get(rollout_manager.async_generate(rollout_id)) # 这里的rolloutid 是按steps
 
         if args.offload:
             ray.get(rollout_manager.async_offload())

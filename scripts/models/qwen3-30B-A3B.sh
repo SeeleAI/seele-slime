@@ -22,7 +22,7 @@ MODEL_ARGS=(
    --kv-channels 128
    --num-layers 48
    --hidden-size 2048
-   --ffn-hidden-size 6144
+   --ffn-hidden-size 5472
 
    --normalization RMSNorm
    --position-embedding-type rope
@@ -32,7 +32,7 @@ MODEL_ARGS=(
    --untie-embeddings-and-output-weights
    --vocab-size 151936
 
-   --rotary-base 1000000
+   --rotary-base 10000000
 
    # moe
    --moe-ffn-hidden-size 768

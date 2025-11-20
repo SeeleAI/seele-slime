@@ -56,6 +56,7 @@ def compute_policy_loss(
     ratio = (-ppo_kl).exp()
     pg_losses1 = -ratio * advantages
     pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
+    # negative loss here, for gradient ascent
     clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
     clipfrac = torch.gt(pg_losses2, pg_losses1).float()
 
@@ -125,6 +126,7 @@ def get_grpo_returns(
     rewards: torch.Tensor,
     kl: list[torch.Tensor],
 ):
+    """Simply broadcast the reward to the whole sequence"""
     returns = []
     for i in range(len(rewards)):
         returns.append(torch.ones_like(kl[i]) * rewards[i])
@@ -283,6 +285,7 @@ def calculate_log_probs_and_entropy(logits, tokens, tp_group, with_entropy: bool
     if logits.size(0) != 0:
         log_prob = compute_log_probs(logits.clone(), tokens, tp_group)
     else:
+        # for empty logits, create empty log_prob
         log_prob = logits.new_zeros((0,))
 
     if with_entropy:

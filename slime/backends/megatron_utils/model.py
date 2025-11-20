@@ -32,7 +32,10 @@ if torch.version.hip:
 def get_optimizer_param_scheduler(args, optimizer):
     """Build the learning rate scheduler."""
     # Iteration-based training.
-    args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    # args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
+    # assert args.rollout_batch_size * args.n_samples_per_prompt == args.global_batch_size, f"Got {args.rollout_batch_size * args.n_samples_per_prompt} / {args.global_batch_size}"
+    # We already set target_data_size = args.global_batch_size, then args.rollout_batch_size * args.n_samples_per_prompt = args.global_batch_size
+    args.train_iters = args.num_rollout #因为每轮必然消耗global_batch_size
     if args.lr_decay_iters is None:
         args.lr_decay_iters = args.train_iters
     lr_decay_steps = args.lr_decay_iters * args.global_batch_size
@@ -302,7 +305,8 @@ def train_one_step(args, rollout_id, step_id, data_iterator, model, optimizer, o
             labels=None,
             packed_seq_params=batch["packed_seq_params"],
         )
-
+        # Lynx: maybe the function will pass logits into the loss_function
+        # hence the logits comes from the Megatron recomputation
         return output_tensor, partial(loss_function, args, batch, num_microbatches)
 
     # Forward pass.

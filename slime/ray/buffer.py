@@ -24,7 +24,8 @@ class RolloutController:
     def __init__(self, args, wandb_run_id):
         self.args = args
         init_wandb_secondary(args, wandb_run_id)
-
+        
+        # 异步生成，中间可能出现打断，(aborted)
         self.data_source = RolloutDataSourceWithBuffer(args)
 
         self.generate_rollout = load_function(self.args.rollout_function_path)
@@ -32,12 +33,14 @@ class RolloutController:
         self.custom_reward_post_process_func = None
         if self.args.custom_reward_post_process_path is not None:
             self.custom_reward_post_process_func = load_function(self.args.custom_reward_post_process_path)
+            
+        # default is: slime.rollout.sglang_rollout.generate_rollout
         print(f"import {self.args.rollout_function_path} as generate_rollout function.")
         print(f"import {self.args.eval_function_path} as eval_generate_rollout function.")
 
     def get_num_rollout_per_epoch(self):
         assert self.args.rollout_global_dataset
-        return len(self.data_source.dataset) // self.args.rollout_batch_size
+        return len(self.data_source.dataset) // self.args.rollout_batch_size # 总样本除批次大小
 
     def generate(self, rollout_id):
         self.rollout_id = rollout_id
@@ -49,11 +52,12 @@ class RolloutController:
             )["samples"]
             data = [Sample.from_dict(sample) for sample in data]
         else:
-            data = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False)
+            data = self.generate_rollout(self.args, rollout_id, self.data_source, evaluation=False) 
             # flatten the data if it is a list of lists
             while isinstance(data[0], list):
                 data = sum(data, [])
-
+                
+            # always trim to the nearest multiple of global_batch_size
             if len(data) % self.args.global_batch_size != 0:
                 trim_len = (len(data) // self.args.global_batch_size) * self.args.global_batch_size
                 origin_data_length = len(data)
@@ -73,8 +77,11 @@ class RolloutController:
                 ),
                 path,
             )
+        # for console and wandb logging
         log_rollout_data(rollout_id, self.args, data, time() - start_time)
         data = self._convert_samples_to_train_data(data)
+        # ray.put: allows multiple workers or tasks to access 
+        # the object without re-computing or re-transmitting it.
         return Box(ray.put(data))
 
     def eval(self, rollout_id):
@@ -85,7 +92,18 @@ class RolloutController:
         data = self.eval_generate_rollout(self.args, rollout_id, self.data_source, evaluation=True)
         log_eval_data(rollout_id, self.args, data)
 
-    def post_process_rewards(self, samples: Union[list[Sample], list[list[Sample]]]):
+    def post_process_rewards(self, samples: Union[list[Sample], list[list[Sample]]]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Process rewards, there are three cases, 1. use custom reward process function,
+        2. use GRPO/GSPO, then we calculate the reward normalization,
+        3. use other methods, then we just return the raw rewards.
+
+        Args:
+            samples (Union[list[Sample], list[list[Sample]]]): _description_
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: raw rewards and processed rewards
+        """
+        # if custom reward post process function is provided, use it
         if self.custom_reward_post_process_func is not None:
             return self.custom_reward_post_process_func(self.args, samples)
 
@@ -97,16 +115,17 @@ class RolloutController:
             # group norm
             rewards = torch.tensor(raw_rewards, dtype=torch.float)
             if rewards.shape[-1] == self.args.n_samples_per_prompt * self.args.rollout_batch_size:
+                # if flattened, reshape back to bs x n_samples_per_prompt
                 rewards = rewards.reshape(-1, self.args.n_samples_per_prompt)
             else:
                 # when samples count are not equal in each group
                 rewards = rewards.view(-1, rewards.shape[-1])
-            mean = rewards.mean(dim=-1, keepdim=True)
-            rewards = rewards - mean
+            mean = rewards.mean(dim=-1, keepdim=True)  # calculate group mean
+            rewards = rewards - mean  # remove bias as in GRPO
 
             if self.args.advantage_estimator in ["grpo", "gspo"] and self.args.grpo_std_normalization:
-                std = rewards.std(dim=-1, keepdim=True)
-                rewards = rewards / (std + 1e-6)
+                std = rewards.std(dim=-1, keepdim=True)  # calculate group std
+                rewards = rewards / (std + 1e-6)  # remove variance and avoid zero division
 
             return raw_rewards, rewards.flatten().tolist()
 
@@ -120,10 +139,10 @@ class RolloutController:
 
         assert len(raw_rewards) == len(samples)
         assert len(rewards) == len(samples)
-
-        train_data = {
-            "tokens": [sample.tokens for sample in samples],
-            "response_lengths": [sample.response_length for sample in samples],
+        # tokens includes the prompt and the response, response length is the length of the response
+        train_data = {  # List[Sample]
+            "tokens": [sample.tokens for sample in samples],  # List[List[int]]
+            "response_lengths": [sample.response_length for sample in samples],  # List[int]
             # some reward model, e.g. remote rm, may return multiple rewards,
             # we could use key to select the reward.
             "rewards": rewards,
@@ -137,7 +156,9 @@ class RolloutController:
         loss_masks = []
         for sample in samples:
             # always instantiate loss_mask if not provided
-            if sample.loss_mask is None:
+            # Lynx: Looks like a naive way of creating loss mask, nested list
+            # with 1 indicting the valid response
+            if sample.loss_mask is None:  # In multi-turn, there will be 0s in the response mask, no mask for prompt tokens
                 sample.loss_mask = [1] * sample.response_length
             assert (
                 len(sample.loss_mask) == sample.response_length
@@ -154,7 +175,7 @@ class RolloutController:
             train_data["round_number"] = [sample.metadata["round_number"] for sample in samples]
 
         # Add rollout log probabilities for off-policy correction
-        if samples[0].rollout_log_probs is not None:
+        if samples[0].rollout_log_probs is not None:  # List[List[flot]], length of log prob is the length of the response
             train_data["rollout_log_probs"] = [sample.rollout_log_probs for sample in samples]
 
         if samples[0].train_metadata is not None:
