@@ -1,12 +1,23 @@
+import argparse
+import json
+import logging
 import os
+from typing import Any, Dict
 
+import yaml
+from sglang_router.launch_router import RouterArgs
 from transformers import AutoConfig
 
 from slime.backends.sglang_utils.arguments import add_sglang_arguments
 from slime.backends.sglang_utils.arguments import validate_args as sglang_validate_args
+from slime.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
+
+from slime.utils.logging_utils import configure_logger
+
+logger = logging.getLogger(__name__)
 
 
-def reset_megatron_args(parser, name, type, default):
+def reset_arg(parser, name, **kwargs):
     """
     Reset the default value of a Megatron argument.
     :param parser: The argument parser.
@@ -15,10 +26,11 @@ def reset_megatron_args(parser, name, type, default):
     """
     for action in parser._actions:
         if name in action.option_strings:
-            action.default = default
+            if "default" in kwargs:
+                action.default = kwargs["default"]
             break
     else:
-        parser.add_argument(name, type=type, default=default)
+        parser.add_argument(name, **kwargs)
 
 
 def get_slime_extra_args_provider(add_custom_arguments=None):
@@ -28,6 +40,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--actor-num-nodes", type=int, default=1, help="Number of nodes for training actor")
             parser.add_argument(
                 "--actor-num-gpus-per-node", type=int, default=8, help="Number of gpus per node for training actor"
+            )
+            parser.add_argument(
+                "--critic-num-nodes", type=int, default=None, help="Number of nodes for training actor"
+            )
+            parser.add_argument(
+                "--critic-num-gpus-per-node", type=int, default=None, help="Number of gpus per node for training actor"
             )
 
             parser.add_argument(
@@ -68,19 +86,86 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--offload",
                 action="store_true",
                 default=False,
+                help=("Equivalent to --offload-train + --offload-rollout. "),
+            )
+            parser.add_argument(
+                "--offload-train",
+                action=argparse.BooleanOptionalAction,
                 help=(
-                    "Whether to offload the rollout generator and training actor to CPU during training. "
+                    "Whether to offload the training actor to CPU during training. "
+                    "This will always be true when --colocate is set."
+                ),
+            )
+            parser.add_argument(
+                "--offload-rollout",
+                action=argparse.BooleanOptionalAction,
+                help=(
+                    "Whether to offload the rollout generator to CPU during training. "
                     "This will always be true when --colocate is set."
                 ),
             )
 
-            reset_megatron_args(parser, "--distributed-backend", str, "nccl")
-            reset_megatron_args(parser, "--distributed-timeout-minutes", int, 10)
+            reset_arg(parser, "--distributed-backend", type=str, default="nccl")
+            reset_arg(parser, "--distributed-timeout-minutes", type=int, default=10)
+
+            return parser
+
+        def add_train_arguments(parser):
+            parser.add_argument(
+                "--train-backend",
+                type=str,
+                choices=["megatron", "fsdp"],
+                default="megatron",
+                help="The backend for training.",
+            )
+            parser.add_argument(
+                "--true-on-policy-mode",
+                action="store_true",
+                default=False,
+                help="Whether to enable true-on-policy mode.",
+            )
+            parser.add_argument(
+                "--train-env-vars",
+                type=json.loads,
+                default="{}",
+                help="Extra environment variables for training process, e.g. PyTorch memory management ones.",
+            )
+            parser.add_argument(
+                "--train-memory-margin-bytes",
+                type=int,
+                default=0,
+                help="Add margin for train memory allocation.",
+            )
+            parser.add_argument(
+                "--disable-weights-backuper",
+                action="store_false",
+                dest="enable_weights_backuper",
+                help="Whether to disable weights backuper to save host memory.",
+            )
+            parser.add_argument(
+                "--megatron-to-hf-mode",
+                choices=["raw", "bridge"],
+                default="raw",
+                help="The method to convert megatron weights to hugging face weights for SGLang.",
+            )
 
             return parser
 
         # rollout
         def add_rollout_arguments(parser):
+            #################################
+            # ADD Custom Dynamic Filter ags #
+            #################################
+            parser.add_argument(
+                "--filter-zero-advantage",
+                action="store_true",
+                default=False
+            )
+            parser.add_argument(
+                "--max-turns",
+                type=int,
+                default=10
+            )
             parser.add_argument(
                 "--hf-checkpoint",
                 type=str,
@@ -92,6 +177,11 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "so you only need to provide a huggingface checkpoint that has the same architecture as the model you want to train. "
                     "It doesn't necessary need to contain the most up-to-date parameters."
                 ),
+            )
+            parser.add_argument(
+                "--use-hf-config-for-megatron",
+                action="store_true",
+                help="Whether to use HF config for Megatron core to define the model architecture.",
             )
             parser.add_argument(
                 "--model-name",
@@ -106,7 +196,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-function-path",
                 type=str,
-                default="slime.rollout.sglang_rollout.generate_rollout", #原来如此
+                default="slime.rollout.sglang_rollout.generate_rollout",
                 help=(
                     "Path to the rollout generation function."
                     "You should use this model to create your own custom rollout function, "
@@ -115,30 +205,6 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "`def generate_rollout(args, rollout_id, *, evaluation=False) -> list[list[Sample]]`"
                     "and within the output sample, you should at least set `tokens`, `response_length`, `reward` "
                     "and `truncated`."
-                ),
-            )
-            parser.add_argument(
-                "--expected_steps_per_trajectory",
-                type=int,
-                default=1, 
-                help=(
-                    ""
-                ),
-            )
-            parser.add_argument(
-                "--max-turns",
-                type=int,
-                default=1, #原来如此
-                help=(
-                    "最大gym交互轮数"
-                ),
-            )
-            parser.add_argument(
-                "--filter-zero-advantage",
-                type=str,
-                default=False, #原来如此
-                help=(
-                    "dynamic sample"
                 ),
             )
             parser.add_argument(
@@ -315,6 +381,46 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "It may be helpful for updating loss mask."
                 ),
             )
+            parser.add_argument(
+                "--rollout-external",
+                action="store_true",
+                default=False,
+                help="Use external SGLang instances instead of launching them inside the framework.",
+            )
+            parser.add_argument(
+                "--rollout-external-engine-addrs",
+                type=str,
+                default=None,
+                nargs="+",
+                help="Address and ports of the external engines.",
+            )
+            return parser
+
+        def add_fault_tolerance_arguments(parser):
+            parser.add_argument(
+                "--use-fault-tolerance",
+                action="store_true",
+                default=False,
+                help="Whether to enable the fault tolerance function during rollout.",
+            )
+            parser.add_argument(
+                "--rollout-health-check-interval",
+                type=float,
+                default=30.0,
+                help="Interval in seconds between rollout engine /health_generate checks during generate/eval.",
+            )
+            parser.add_argument(
+                "--rollout-health-check-timeout",
+                type=float,
+                default=30.0,
+                help="Timeout in seconds to wait for a rollout engine /health_generate response before killing it.",
+            )
+            parser.add_argument(
+                "--rollout-health-check-first-wait",
+                type=float,
+                default=300.0,
+                help="Time to wait for the compilation before the actual health check.",
+            )
             return parser
 
         # data
@@ -325,7 +431,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--num-rollout",
                 type=int,
                 default=None,
-                help="Number of rollout steps. Currently, we don't support passing num_epoch and calculate num_rollout from data size.",
+                help="Number of rollout steps. If not set, we will calculate the number of rollout steps from the dataset size.",
             )
             parser.add_argument(
                 "--num-epoch",
@@ -335,6 +441,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Number of epochs for the training. "
                     "This is used to calculate the number of rollout steps from the dataset size. "
                     "If set, we will calculate the number of rollout steps as `num_rollout = num_epoch * dataset_size // rollout_batch_size`."
+                    "If both `--num-epoch` and `--num-rollout` are set, `--num-epoch` will be ignored."
                 ),
             )
 
@@ -359,12 +466,22 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Currently we only support jsonl format, and each line should contains --input-key and --label-key, "
                     "which will be used as the prompt and the label respectively. "
                     "If you want to use a custom template, you can set --apply-chat-template to true, in that case, "
-                    "the input should be the same structure as an openai message, e.g. [\{'role': 'user', 'content': 'blabla'\}]. "
+                    "the input should be the same structure as an openai message, e.g. [{'role': 'user', 'content': 'blabla'}]. "
                 ),
             )
             parser.add_argument("--apply-chat-template", action="store_true", default=False)
+            # Temporarily be JSON-serialized str, will be a real dict after using Omegaconf
+            parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default="{}")
             parser.add_argument("--input-key", type=str, default="input", help="JSON dataset key")
             parser.add_argument("--label-key", type=str, default=None, help="JSON dataset key")
+            parser.add_argument(
+                "--multimodal-keys",
+                type=json.loads,
+                default=None,
+                help=(
+                    'JSON string for multimodal data mapping media types to data keys. Example: \'{"image": "image_file"}\''
+                ),
+            )
             parser.add_argument("--metadata-key", type=str, default="metadata", help="JSON dataset key")
             parser.add_argument(
                 "--tool-key",
@@ -389,6 +506,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--rollout-batch-size",
                 type=int,
+                required=True,
                 help=(
                     "The number of prompts in each rollout step. "
                     "The total data returned should be rollout_batch_size * n_samples_per_prompt. "
@@ -401,7 +519,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             # gbs of the training, note that the gbs is of sample, not of prompts,
             # so if you hope to train 1 step for each rollout, the global_bach_size should be set as
             # `rollout_batch_size * n_samples_per_prompt`.
-            reset_megatron_args(parser, "--global-batch-size", int, None)
+            reset_arg(parser, "--global-batch-size", type=int, default=None)
             parser.add_argument(
                 "--num-steps-per-rollout",
                 type=int,
@@ -412,7 +530,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             # mbs for the training, will be ignored if `use_dynamic_batch_size` is set.
-            reset_megatron_args(parser, "--micro-batch-size", int, 1)
+            reset_arg(parser, "--micro-batch-size", type=int, default=1)
             parser.add_argument(
                 "--balance-data",
                 action="store_true",
@@ -468,7 +586,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
 
             # change the default value of eval_interval from Megatron to None
-            reset_megatron_args(parser, "--eval-interval", int, None)
+            reset_arg(parser, "--eval-interval", type=int, default=None)
 
             parser.add_argument(
                 "--eval-prompt-data",
@@ -479,6 +597,15 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "Path to the evaluation prompt data, "
                     "should first input the name of the eval dataset and then the path, e.g. "
                     "aime /path/to/aime.jsonl"
+                ),
+            )
+            parser.add_argument(
+                "--eval-config",
+                type=str,
+                default=None,
+                help=(
+                    "Path to an OmegaConf YAML/JSON file describing evaluation datasets. "
+                    "When provided, this overrides --eval-prompt-data."
                 ),
             )
 
@@ -513,10 +640,24 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--ref-ckpt-step", type=int, default=None, help="The checkpoint step for reference model. "
             )
-            reset_megatron_args(parser, "--load", str, None)
-            reset_megatron_args(parser, "--save", str, None)
-            reset_megatron_args(parser, "--save-interval", int, None)
-            reset_megatron_args(parser, "--seed", int, 1234)
+            reset_arg(parser, "--load", type=str, default=None)
+            reset_arg(parser, "--save", type=str, default=None)
+            reset_arg(parser, "--save-interval", type=int, default=None)
+            reset_arg(parser, "--seed", type=int, default=1234)
+            reset_arg(parser, "--clip-grad", type=float, default=1.0)
+            reset_arg(parser, "--calculate-per-token-loss", action="store_true")
+            reset_arg(parser, "--lr", type=float, default=1e-6)
+
+            parser.add_argument("--num-critic-only-steps", type=int, default=0, help="Number of critic only steps")
+            parser.add_argument("--critic-load", type=str, default=None, help="The checkpoint for critic model.")
+            parser.add_argument("--critic-save", type=str, default=None, help="The checkpoint for critic model.")
+            parser.add_argument("--critic-lr", type=float, default=None, help="The lr for critic model")
+            parser.add_argument(
+                "--critic-lr-warmup-iters",
+                type=int,
+                default=0,
+                help="number of iterations to linearly warmup for critic model.",
+            )
 
             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
@@ -526,6 +667,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729",
             )
+            parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
             parser.add_argument(
                 "--kl-coef",
                 type=float,
@@ -554,14 +696,21 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument(
                 "--kl-loss-type",
                 type=str,
-                choices=["kl", "k2", "k3", "low_var_kl"],
-                default="kl",
-                help="Choose KL loss type: kl, k2, k3 low_var_kl",
+                choices=["k1", "k2", "k3", "low_var_kl"],
+                default="k1",
+                help="Choose KL loss type: kl, k2, k3, low_var_kl",
             )
             parser.add_argument(
                 "--advantage-estimator",
                 type=str,
-                choices=["grpo", "gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"],
+                choices=[
+                    "grpo",
+                    "gspo",
+                    "reinforce_plus_plus",
+                    "reinforce_plus_plus_baseline",
+                    "ppo",
+                    "on_policy_distillation",
+                ],
                 default="grpo",
             )
             parser.add_argument(
@@ -583,8 +732,15 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=0.0,
                 help="KL penalty coefficient for the loss function. This is added to the final PPO loss.",
             )
+            parser.add_argument(
+                "--ref-update-interval",
+                type=int,
+                default=None,
+                help="Interval (in rollout steps) to update ref model from actor. If None, ref model is not updated.",
+            )
             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
-            parser.add_argument("--gamma", type=float, default=1.0, help="Discount factor for rewards in REINFORCE++.")
+            parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
+            parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
                 "--disable-grpo-std-normalization",
@@ -607,6 +763,21 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "This is useful for doing special loss mask."
                 ),
             )
+            parser.add_argument(
+                "--get-mismatch-metrics",
+                action="store_true",
+                default=False,
+                help="Whether to calculate the mismatch metrics.",
+            )
+            parser.add_argument(
+                "--use-rollout-logprobs",
+                action="store_true",
+                default=False,
+                help=(
+                    "Whether to use the rollout logprobs when calculating the importance sampling ratios. "
+                    "If not set, we will use the logprobs from the actor model."
+                ),
+            )
             # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
             parser.add_argument(
                 "--use-tis",
@@ -626,6 +797,53 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=0,
                 help="Lower bound clipping threshold C for importance sampling ratios to control variance.",
             )
+            parser.add_argument(
+                "--custom-tis-function-path",
+                type=str,
+                default=None,
+                help="Path to the custom TIS/RS function (e.g., examples/train_infer_mismatch_helper/mis.py:compute_mis_weights_with_cp).",
+            )
+
+            parser.add_argument(
+                "--use-routing-replay",
+                action="store_true",
+                default=False,
+                help="The routing replay technique from https://arxiv.org/abs/2507.18071",
+            )
+            parser.add_argument(
+                "--use-rollout-routing-replay",
+                action="store_true",
+                default=False,
+                help="The rollout routing replay technique from https://arxiv.org/abs/2510.11370",
+            )
+            return parser
+
+        def add_router_arguments(parser):
+            parser.add_argument(
+                "--use-slime-router",
+                action="store_true",
+                default=False,
+                help="Whether to use SlimeRouter for text-based routing instead of SGLang token-based routing",
+            )
+            parser.add_argument(
+                "--slime-router-middleware-paths",
+                type=str,
+                nargs="+",
+                default="",
+            )
+            parser.add_argument(
+                "--slime-router-timeout",
+                type=float,
+                default=None,
+                help="Timeout for SlimeRouter HTTP requests in seconds.",
+            )
+            parser.add_argument(
+                "--slime-router-max-connections",
+                type=int,
+                default=None,
+                help="Max connections for SlimeRouter HTTP client.",
+            )
+            RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
         # wandb
@@ -649,7 +867,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             parser.add_argument("--wandb-host", type=str, default=None)
             parser.add_argument("--wandb-team", type=str, default=None)
             parser.add_argument("--wandb-group", type=str, default=None)
-            reset_megatron_args(parser, "--wandb-project", str, None)
+            reset_arg(parser, "--wandb-project", type=str, default=None)
             parser.add_argument(
                 "--disable-wandb-random-suffix",
                 action="store_false",
@@ -682,7 +900,30 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help="Whether to turn on passrate logging, which will log the pass@n of the responses in the rollout.",
             )
+            parser.add_argument(
+                "--log-reward-category",
+                type=str,
+                default=None,
+                help=(
+                    "Log statistics of the category of reward, such as why the reward function considers it as failed. "
+                    "Specify the key in the reward dict using this argument.",
+                ),
+            )
             parser.add_argument("--wandb-run-id", type=str, default=None)
+            return parser
+
+        # tensorboard
+        def add_tensorboard_arguments(parser):
+            # tb_project_name, tb_experiment_name
+            parser.add_argument("--use-tensorboard", action="store_true", default=False)
+            parser.add_argument(
+                "--tb-project-name",
+                type=str,
+                default=None,
+                help="Directory to store tensorboard logs. Default is  os.environ.get('TENSORBOARD_DIR') directory.",
+            )
+            parser.add_argument("--tb-experiment-name", type=str, default=None)
+
             return parser
 
         # debug
@@ -705,6 +946,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "The file will be loaded from `load_debug_rollout_data.format(rollout_id)`. "
                     "When this is enabled, slime will not instantiate sglang servers."
                 ),
+            )
+            parser.add_argument(
+                "--load-debug-rollout-data-subsample",
+                type=float,
+                default=None,
+                help="Subsample a portion of the debug rollout data for faster debugging.",
             )
             parser.add_argument(
                 "--debug-rollout-only",
@@ -739,11 +986,36 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help=("Dump all details of training for post-hoc analysis and visualization."),
             )
+            # use together with --record-memory-history and --memory-snapshot-path (defined in Megatron)
+            parser.add_argument(
+                "--memory-snapshot-dir",
+                type=str,
+                default=".",
+            )
+            parser.add_argument(
+                "--memory-snapshot-num-steps",
+                type=int,
+                default=None,
+            )
+            parser.add_argument(
+                "--profile-target",
+                type=str,
+                choices=["train_overall", "train_actor", "train_log_probs"],
+                default=["train_overall"],
+                nargs="+",
+            )
+            parser.add_argument(
+                "--memory-recorder",
+                type=str,
+                choices=["torch", "memray"],
+                default="torch",
+            )
+            parser.add_argument("--check-weight-update-equal", action="store_true")
             return parser
 
         def add_network_arguments(parser):
             parser.add_argument("--http-proxy", type=str, default=None)
-            parser.add_argument("--use-http2", action="store_true", default=False)
+            parser.add_argument("--use-distributed-post", action="store_true", default=False)
             return parser
 
         def add_reward_model_arguments(parser):
@@ -826,8 +1098,14 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--loss-mask-type",
                 type=str,
                 default="qwen",
-                choices=["qwen", "distill_qwen"],
+                choices=["qwen", "qwen3", "distill_qwen"],
                 help="Loss mask type",
+            )
+            parser.add_argument(
+                "--data-pad-size-multiplier",
+                type=int,
+                default=128,
+                help="Multiplier for data padding size in data processing.",
             )
             return parser
 
@@ -854,33 +1132,79 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
+        def add_mtp_training_arguments(parser):
+            """Add MTP training specific arguments."""
+            reset_arg(parser, "--mtp-num-layers", type=int, default=None)
+            reset_arg(parser, "--mtp-loss-scaling-factor", type=float, default=0.2)
+            parser.add_argument(
+                "--enable-mtp-training",
+                action="store_true",
+                default=False,
+                help="Enable MTP layer parameter updates during training",
+            )
+
+            return parser
+
         def add_ci_arguments(parser):
             parser.add_argument(
                 "--ci-test",
                 action="store_true",
             )
+            parser.add_argument(
+                "--ci-disable-kl-checker",
+                action="store_true",
+            )
+            parser.add_argument(
+                "--ci-metric-checker-key",
+                type=str,
+                default=None,
+            )
+            parser.add_argument(
+                "--ci-metric-checker-threshold",
+                type=float,
+                default=None,
+            )
             return parser
+
+        def add_sglang_tp_size():
+            temp_parser = argparse.ArgumentParser(add_help=False)
+            temp_parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
+            temp_args, _ = temp_parser.parse_known_args()
+            sglang_tp_size = temp_args.rollout_num_gpus_per_engine
+            return sglang_tp_size
 
         # Add custom arguments in front to prevent overwritten some slime arguments.
         if add_custom_arguments is not None:
             parser = add_custom_arguments(parser)
 
         parser = add_cluster_arguments(parser)
+        parser = add_train_arguments(parser)
         parser = add_rollout_arguments(parser)
+        parser = add_fault_tolerance_arguments(parser)
         parser = add_data_arguments(parser)
         parser = add_eval_arguments(parser)
         parser = add_algo_arguments(parser)
         parser = add_wandb_arguments(parser)
+        parser = add_tensorboard_arguments(parser)
+        parser = add_router_arguments(parser)
         parser = add_debug_arguments(parser)
         parser = add_sglang_arguments(parser)
         parser = add_network_arguments(parser)
         parser = add_reward_model_arguments(parser)
         parser = add_rollout_buffer_arguments(parser)
+        parser = add_mtp_training_arguments(parser)
         parser = add_ci_arguments(parser)
+        parser.set_defaults(sglang_tensor_parallel_size=add_sglang_tp_size())
 
         # For megatron
         parser = add_custom_megatron_plugins_arguments(parser)
         try:
+            parser.add_argument(
+                "--custom-config-path",
+                type=str,
+                default=None,
+                help="Path to the YAML config for custom function arguments.",
+            )
             parser.add_argument("--padded-vocab-size", type=int, default=None)
         except:
             pass
@@ -890,51 +1214,120 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
     return add_slime_arguments
 
 
-def warning_for_unfinished_backend(backend: str):
-    print("⚠️ " * 50)
-    print(
-        f"⚠️  SLIME_BACKEND {backend} is experimental and not yet verified.\n"
-        "⚠️  Please avoid using it unless you are actively developing it."
-    )
-    print("⚠️ " * 50)
-
-
 def parse_args(add_custom_arguments=None):
+    # Users may call `parse_args` very early, thus we ensure logger is configured here
+    configure_logger()
+
     add_slime_arguments = get_slime_extra_args_provider(add_custom_arguments)
 
-    backend = os.environ.get("SLIME_BACKEND", "megatron").lower()
+    backend = parse_args_train_backend()
     if backend == "megatron":
         from slime.backends.megatron_utils import parse_args as megatron_parse_args
         from slime.backends.megatron_utils import set_default_megatron_args
         from slime.backends.megatron_utils import validate_args as megatron_validate_args
 
         args = megatron_parse_args(extra_args_provider=add_slime_arguments)
-        if getattr(args, "hf_checkpoint", None):
+        if args.hf_checkpoint:
             hf_config = AutoConfig.from_pretrained(args.hf_checkpoint, trust_remote_code=True)
+            if args.use_hf_config_for_megatron:
+                from slime.backends.megatron_utils.config_mapping import get_mapper
+
+                megatron_config_from_hf = get_mapper(hf_config.model_type)(hf_config)
+                _validate_and_update_megatron_args_from_hf(args, megatron_config_from_hf.transformer_config)
+                _validate_and_update_megatron_args_from_hf(args, megatron_config_from_hf.gpt_model_args)
             hf_validate_args(args, hf_config)
 
         args.rank = 0
         args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
         args = set_default_megatron_args(args)
-    elif backend == "xtuner":
-        warning_for_unfinished_backend(backend)
-        from slime.backends.xtuner_utils.arguments import parse_args as xtuner_parse_args
-
-        args = xtuner_parse_args(add_slime_arguments)
-        args.rank = 0
-        args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
     else:
-        warning_for_unfinished_backend(backend)
         from slime.backends.fsdp_utils.arguments import load_fsdp_args
 
         args = load_fsdp_args(extra_args_provider=add_slime_arguments)
+        args.rank = 0  # Primary process rank for wandb initialization
+        args.world_size = args.actor_num_nodes * args.actor_num_gpus_per_node
+
+    slime_validate_args(args)
+
+    if backend == "megatron":
+        megatron_validate_args(args)
+
+        # always use varlen
+        args.variable_seq_lengths = True
+        if getattr(args, "moe_token_dispatcher_type", None) == "allgather":
+            logger.info(
+                "--moe-token-dispatcher-type allgather does not support variable sequence length, "
+                "please use alltoall dispatcher instead."
+            )
+            args.moe_token_dispatcher_type = "alltoall"
+
+    sglang_validate_args(args)
+
+    return args
+
+
+def parse_args_train_backend():
+    if os.environ.get("SLIME_BACKEND") is not None:
+        raise Exception("`SLIME_BACKEND` is deprecated, please use --train-backend directly.")
+
+    parser = argparse.ArgumentParser()
+    get_slime_extra_args_provider()(parser)
+    args_partial, _ = parser.parse_known_args()
+    return args_partial.train_backend
+
+
+def _resolve_eval_datasets(args) -> list[EvalDatasetConfig]:
+    """
+    Build evaluation dataset configurations from either --eval-config or --eval-prompt-data.
+    """
+    datasets_config = []
+    defaults: Dict[str, Any] = {}
+
+    if args.eval_config:
+        from omegaconf import OmegaConf
+
+        cfg = OmegaConf.load(args.eval_config)
+        cfg_dict = OmegaConf.to_container(cfg, resolve=True)
+        if not isinstance(cfg_dict, dict):
+            raise ValueError("--eval-config must contain a mapping at the root.")
+
+        eval_cfg = cfg_dict.get("eval", cfg_dict)
+        if not isinstance(eval_cfg, dict):
+            raise ValueError("--eval-config must define an `eval` mapping or be a mapping itself.")
+
+        defaults = dict(eval_cfg.get("defaults") or {})
+        datasets_config = ensure_dataset_list(eval_cfg.get("datasets"))
+        if not datasets_config:
+            raise ValueError("--eval-config does not define any datasets under `eval.datasets`.")
+    elif args.eval_prompt_data:
+        values = list(args.eval_prompt_data)
+        if len(values) == 1:
+            logger.info("[legacy] only one eval_prompt_data detected, will assume it is data for aime")
+            values = ["aime", values[0]]
+        if len(values) % 2 != 0:
+            raise ValueError("eval prompt data must be provided as name/path pairs.")
+        datasets_config = [{"name": values[i], "path": values[i + 1]} for i in range(0, len(values), 2)]
+    else:
+        datasets_config = []
+
+    eval_datasets = build_eval_dataset_configs(datasets_config, defaults)
+    if eval_datasets:
+        args.eval_prompt_data = [item for dataset in eval_datasets for item in (dataset.name, dataset.path)]
+    else:
+        args.eval_prompt_data = None
+
+    return eval_datasets
+
+
+def slime_validate_args(args):
+    args.eval_datasets = _resolve_eval_datasets(args)
 
     if args.kl_coef != 0 or args.use_kl_loss:
         if not os.path.exists(args.ref_load):
             raise FileNotFoundError(f"ref_load {args.ref_load} does not exist, please check the path.")
 
         if not os.path.exists(os.path.join(args.ref_load, "latest_checkpointed_iteration.txt")):
-            print(
+            logger.info(
                 f"ref_load {args.ref_load} does not have latest_checkpointed_iteration.txt, "
                 "please make sure it is a valid megatron checkpoint directory."
             )
@@ -954,11 +1347,7 @@ def parse_args(add_custom_arguments=None):
         args.start_rollout_id = 0
 
     if args.eval_interval is not None:
-        assert args.eval_prompt_data is not None, "eval_prompt_data must be set when eval_interval is set"
-        if len(args.eval_prompt_data) == 1:
-            print(f"[legacy] only one eval_prompt_data detected, will assume it is data for aime")
-            args.eval_prompt_data = ["aime", args.eval_prompt_data[0]]
-        assert len(args.eval_prompt_data) % 2 == 0, "eval prompt data will need to be in pairs"
+        assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."
@@ -970,6 +1359,19 @@ def parse_args(add_custom_arguments=None):
             "The 'reinforce_plus_plus' and 'reinforce_plus_plus_baseline' advantage estimators "
             "require advantage normalization. Please add `--normalize-advantages` to your command."
         )
+
+    if args.use_rollout_logprobs:
+        assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
+
+    if args.get_mismatch_metrics:
+        assert (
+            args.custom_tis_function_path is not None
+        ), "custom_tis_function_path must be set when get_mismatch_metrics is set"
+
+        if args.use_rollout_logprobs:
+            print(
+                "get_mismatch_metrics is set; For metrics calculation, the log probs will still be recomputed by training engine. One more forward pass will be applied."
+            )
 
     if args.use_dynamic_batch_size:
         assert args.max_tokens_per_gpu is not None, "max_tokens_per_gpu must be set when use_dynamic_batch_size is set"
@@ -987,20 +1389,38 @@ def parse_args(add_custom_arguments=None):
         args.save_debug_train_data = f"{args.dump_details}/train_data/{{rollout_id}}_{{rank}}.pt"
 
     if args.load_debug_rollout_data is not None:
-        print(
+        logger.info(
             f"load_debug_rollout_data {args.load_debug_rollout_data} is set, "
-            "will not instantiate sglang servers and will only run the rollout generation."
+            "will not instantiate sglang servers and will only run the training process."
         )
         args.debug_train_only = True
 
+    args.use_critic = args.advantage_estimator == "ppo"
+    if args.critic_num_gpus_per_node is None:
+        args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
+    if args.critic_num_nodes is None:
+        args.critic_num_nodes = args.actor_num_nodes
+    if args.critic_load is None:
+        args.critic_load = args.load
+    if args.critic_lr is None:
+        args.critic_lr = args.lr
+
+    if args.offload:
+        args.offload_train = True
+        args.offload_rollout = True
+    del args.offload
+
     if args.debug_rollout_only:
-        if args.colocate and args.rollout_num_gpus is None:
+        if args.colocate and (not args.rollout_num_gpus):
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
         else:
             args.actor_num_gpus_per_node = min(8, args.rollout_num_gpus)
             args.actor_num_nodes = args.rollout_num_gpus // args.actor_num_gpus_per_node
         args.colocate = False
-        args.offload = False
+        args.offload_train = args.offload_rollout = False
+        if args.train_memory_margin_bytes > 0:
+            logger.warning("Force train_memory_margin_bytes=0 since debug_rollout_only does not support it")
+            args.train_memory_margin_bytes = 0
 
     assert not (args.debug_rollout_only and args.debug_train_only), (
         "debug_rollout_only and debug_train_only cannot be set at the same time, " "please set only one of them."
@@ -1008,13 +1428,23 @@ def parse_args(add_custom_arguments=None):
 
     # always true on offload for colocate at the moment.
     if args.colocate:
-        args.offload = True
+        if args.offload_train is None:
+            args.offload_train = True
+        if args.offload_rollout is None:
+            args.offload_rollout = True
         if args.rollout_num_gpus != args.actor_num_gpus_per_node * args.actor_num_nodes:
-            print(
+            logger.info(
                 f"rollout_num_gpus {args.rollout_num_gpus} != actor_num_gpus_per_node {args.actor_num_gpus_per_node} "
                 f"* actor_num_nodes {args.actor_num_nodes}, overriding rollout_num_gpus to match actor_num_gpus_per_node * actor_num_nodes."
             )
             args.rollout_num_gpus = args.actor_num_gpus_per_node * args.actor_num_nodes
+            if args.use_critic:
+                args.rollout_num_gpus += args.critic_num_gpus_per_node * args.critic_num_nodes
+
+    if args.offload_train is None:
+        args.offload_train = False
+    if args.offload_rollout is None:
+        args.offload_rollout = False
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
@@ -1028,34 +1458,27 @@ def parse_args(add_custom_arguments=None):
                 f"// num_steps_per_rollout {args.num_steps_per_rollout}"
             )
         args.global_batch_size = global_batch_size
-        
-    # Lynx: here we calibrate the rollout_batch_size
-    # assert args.global_batch_size % args.n_samples_per_prompt == 0, (
-    #     f"global_batch_size {args.global_batch_size} is not a multiple of n_samples_per_prompt {args.n_samples_per_prompt}"
-    # )
-    # args.rollout_batch_size = args.global_batch_size // args.n_samples_per_prompt
 
-    # assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
-    #     f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
-    #     f"is not a multiple of global_batch_size {args.global_batch_size}"
-    # )
+    assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
+        f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+        f"is not a multiple of global_batch_size {args.global_batch_size}"
+    )
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False
-        print("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
-        
-    # Lynx: temporally use the original logic
+        logger.info("n_samples_per_prompt is set to 1, grpo_std_normalization will be set to False.")
+
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
 
-    # assert args.over_sampling_batch_size >= args.rollout_batch_size, (
-    #     f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
-    #     f"rollout_batch_size {args.rollout_batch_size}"
-    # )
+    assert args.over_sampling_batch_size >= args.rollout_batch_size, (
+        f"over_sampling_batch_size {args.over_sampling_batch_size} should be greater than or equal to "
+        f"rollout_batch_size {args.rollout_batch_size}"
+    )
 
     if args.num_epoch is not None:
         if args.num_rollout is not None:
-            print("Both num_epoch and num_rollout are set, num_epoch will be ignored.")
+            logger.info("Both num_epoch and num_rollout are set, num_epoch will be ignored.")
         else:
             assert args.rollout_global_dataset, (
                 "num_epoch is set, but rollout_global_dataset is not set, "
@@ -1067,25 +1490,26 @@ def parse_args(add_custom_arguments=None):
             "num_epoch is not set, but num_rollout is not set, " "please set --num-rollout or --num-epoch"
         )
 
-    if backend == "megatron":
-        megatron_validate_args(args)
+    if args.enable_mtp_training:
+        assert args.mtp_num_layers, "mtp_num_layers must be set when enable_mtp_training is set"
 
-        # always use varlen
-        args.variable_seq_lengths = True
-        if getattr(args, "moe_token_dispatcher_type", None) == "allgather":
-            print(
-                "--moe-token-dispatcher-type allgather does not support variable sequence length, "
-                "please use alltoall dispatcher instead."
-            )
-            args.moe_token_dispatcher_type = "alltoall"
+    if args.use_rollout_routing_replay:
+        args.use_routing_replay = True
 
-    sglang_validate_args(args)
-
-    return args
+    if args.custom_config_path:
+        with open(args.custom_config_path, "r") as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if hasattr(args, k):
+                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
+            setattr(args, k, v)
 
 
 def hf_validate_args(args, hf_config):
     equal = lambda x, y: x == y
+
+    errors = []
+
     for hf_config_name, megatron_config_name, compare_fn in [
         ("hidden_size", "hidden_size", equal),
         ("num_attention_heads", "num_attention_heads", equal),
@@ -1096,7 +1520,20 @@ def hf_validate_args(args, hf_config):
         ("rope_theta", "rotary_base", equal),
     ]:
         if hasattr(hf_config, hf_config_name):
-            assert compare_fn(getattr(hf_config, hf_config_name), getattr(args, megatron_config_name)), (
-                f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
-                f"{megatron_config_name} {getattr(args, megatron_config_name)}, please check the config."
+            if not compare_fn(getattr(hf_config, hf_config_name), getattr(args, megatron_config_name)):
+                errors.append(
+                    f"{hf_config_name} in hf config {getattr(hf_config, hf_config_name)} is not equal to "
+                    f"{megatron_config_name} {getattr(args, megatron_config_name)}, please check the config."
+                )
+
+    if len(errors) > 0:
+        raise AssertionError(f"hf_validate_args failed: " + "; ".join(errors))
+
+
+def _validate_and_update_megatron_args_from_hf(args, args_from_hf_config: Dict[str, Any]):
+    for key, value in args_from_hf_config.items():
+        if hasattr(args, key) and getattr(args, key) != value:
+            raise ValueError(
+                f"Argument {key} is not consistent. {key} in args is {getattr(args, key)}, but from HF config is {value}."
             )
+        setattr(args, key, value)

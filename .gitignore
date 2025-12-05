@@ -193,3 +193,5 @@ _examples_synced/
 .env
 
 env_data/
+
+agent_gym_data.jsonl

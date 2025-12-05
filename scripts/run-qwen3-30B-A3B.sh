@@ -9,13 +9,15 @@ pkill -9 python
 sleep 3
 pkill -9 ray
 pkill -9 python
+pkill -9 redis
 
 set -ex
 
 # will prevent ray from buffering stdout/stderr
 export PYTHONBUFFERED=16
+export WANDB_KEY="e99eee1f4a4b3965568fe7ce586ecd4c40ca1007"
 
-NVLINK_COUNT=$(nvidia-smi | grep -o "NVLink" | wc -l)
+NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
 if [ "$NVLINK_COUNT" -gt 0 ]; then
     HAS_NVLINK=1
 else
@@ -27,16 +29,21 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 source "${SCRIPT_DIR}/models/qwen3-30B-A3B.sh"
 
 CKPT_ARGS=(
-   --hf-checkpoint /root/Qwen3-30B-A3B
+   --hf-checkpoint /root/agent_ckpt/Qwen3-Coder-30B-A3B-Instruct/
    #--hf-checkpoint /root/Qwen3-30B-A3B-FP8
-   --ref-load /root/Qwen3-30B-A3B_torch_dist
-   --load /root/Qwen3-4B_slime/
-   --save /root/Qwen3-4B_slime/
+   --ref-load /root/agent_ckpt/Qwen3_torch_dist
+   --load /root/agent_ckpt/Qwen3-30B-A3B_slime/
+   --save /root/agent_ckpt/Qwen3-30B-A3B_slime/
    --save-interval 20
 )
 
 ROLLOUT_ARGS=(
-   --prompt-data /root/dapo-math-17k/dapo-math-17k.jsonl
+   --rollout-function-path gym_rollout.generate_rollout
+   # --save-debug-rollout-data debug_rollout
+   # --load-debug-rollout-data debug_rollout
+   --filter-zero-advantage
+   --max-turns 40
+   --prompt-data /root/seele-agent/agent_gym_data.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -47,25 +54,26 @@ ROLLOUT_ARGS=(
    --n-samples-per-prompt 8
    --rollout-max-response-len 8192
    --rollout-temperature 0.8
-
-   --global-batch-size 256
-   --balance-data
+   --use-tis
+   --global-batch-size 32
+   # --balance-data
 )
 
 EVAL_ARGS=(
-   --eval-interval 20
-   --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
-   --n-samples-per-eval-prompt 16
-   --eval-max-response-len 16384
-   --eval-top-p 0.7
+   # --eval-interval 20
+   # --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
+   # --n-samples-per-eval-prompt 16
+   # --eval-max-response-len 16384
+   # --eval-top-p 0.7
 )
 
 PERF_ARGS=(
-   --tensor-model-parallel-size 4
+   --actor-num-gpus-per-node 6
+   --tensor-model-parallel-size 2
    --sequence-parallel
-   --pipeline-model-parallel-size 1
+   --pipeline-model-parallel-size 3
    --context-parallel-size 1
-   --expert-model-parallel-size 8
+   --expert-model-parallel-size 2
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
@@ -78,7 +86,7 @@ PERF_ARGS=(
 )
 
 GRPO_ARGS=(
-   --advantage-estimator grpo
+   --advantage-estimator gspo
    --use-kl-loss
    --kl-loss-coef 0.00
    --kl-loss-type low_var_kl
@@ -101,14 +109,15 @@ OPTIMIZER_ARGS=(
 )
 
 WANDB_ARGS=(
-   #--use-wandb
-   # --wandb-project slime-dev
-   # --wandb-group qwen3-30B-A3B-test
-   # --wandb-key ${WANDB_KEY}
+   --use-wandb
+   --wandb-project qwen3-30B-coder-agent
+   --wandb-group binary_reward
+   --wandb-key ${WANDB_KEY}
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 8
+   --rollout-num-gpus 2
+   --rollout-num-gpus-per-engine 1
    --sglang-mem-fraction-static 0.7
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
 )
@@ -142,13 +151,11 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 8 \
-   --colocate \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \
    ${OPTIMIZER_ARGS[@]} \
    ${GRPO_ARGS[@]} \
-   ${DISTRIBUTED_ARGS[@]} \
    ${WANDB_ARGS[@]} \
    ${PERF_ARGS[@]} \
    ${EVAL_ARGS[@]} \

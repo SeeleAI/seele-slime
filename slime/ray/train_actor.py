@@ -1,13 +1,21 @@
 import abc
+import logging
 import os
+import random
 from datetime import timedelta
 
 import ray
 import torch
 import torch.distributed as dist
+from torch_memory_saver import torch_memory_saver
 
+import slime.utils.eval_config
 from slime.ray.ray_actor import RayActor
 from slime.utils.distributed_utils import init_gloo_group
+from slime.utils.logging_utils import configure_logger
+from slime.utils.memory_utils import clear_memory, print_memory
+
+logger = logging.getLogger(__name__)
 
 
 def get_local_gpu_id():
@@ -19,13 +27,17 @@ def get_local_gpu_id():
 
 
 class TrainRayActor(RayActor):
-    def __init__(self, world_size, rank, master_addr, master_port, wandb_run_id):
+    def __init__(self, world_size, rank, master_addr, master_port):
+        configure_logger()
+
         self._world_size = world_size
         self._rank = rank
         if master_addr:
             self.master_addr, self.master_port = master_addr, master_port
         else:
-            self.master_addr, self.master_port = self._get_current_node_ip_and_free_port(start_port=20000)
+            self.master_addr, self.master_port = self._get_current_node_ip_and_free_port(
+                start_port=random.randint(20000, 21000)
+            )
 
         os.environ["MASTER_ADDR"] = self.master_addr
         os.environ["MASTER_PORT"] = str(self.master_port)
@@ -36,16 +48,30 @@ class TrainRayActor(RayActor):
         # os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0])
         os.environ["LOCAL_RANK"] = str(get_local_gpu_id())
 
-    def init(self, args, role, wandb_run_id, with_ref=False):
+    def init(self, args, role, with_ref=False):
         self.args = args
         self.role = role
         self.with_ref = with_ref
 
+        if (x := args.train_memory_margin_bytes) > 0:
+            logger.info(f"Set torch_memory_saver.memory_margin_bytes to {x}")
+            assert args.offload_train
+            torch_memory_saver.memory_margin_bytes = x
+
+        torch.serialization.add_safe_globals([slime.utils.eval_config.EvalDatasetConfig])
+
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(f"cuda:{local_rank}")
 
+        # Use hybrid backend when FSDP CPU offload is enabled with a CPU backend
+        backend = args.distributed_backend
+        if getattr(args, "fsdp_cpu_offload", False) and getattr(args, "fsdp_cpu_backend", None):
+            cpu_backend = args.fsdp_cpu_backend
+            backend = f"cpu:{cpu_backend},cuda:{args.distributed_backend}"
+            logger.info(f"FSDP CPU offload enabled, using hybrid backend: {backend}")
+
         dist.init_process_group(
-            backend=args.distributed_backend,
+            backend=backend,
             timeout=timedelta(minutes=args.distributed_timeout_minutes),
         )
         init_gloo_group()
@@ -53,35 +79,32 @@ class TrainRayActor(RayActor):
         args.rank = dist.get_rank()
         args.world_size = dist.get_world_size()
 
-        # set current device
-        args.local_rank = args.rank % torch.cuda.device_count()
-        torch.cuda.set_device(f"cuda:{args.local_rank}")
-
         try:
-            """
-            On large servers with multiple CPU sockets, a GPU is 
-            physically wired to be "closer" to one CPU than another 
-            (this is called NUMA, or Non-Uniform Memory Access). This command 
-            tells the system to make this Python process (and its GPU) prefer 
-            using the CPU cores that are physically closest to it. This reduces 
-            latency when moving data between the CPU and GPU, which can speed up data loading.
-            """
-            import pynvml
+            if torch.version.hip is not None:
+                logger.info(f"Detected ROCm/HIP environment, skipping NUMA affinity setup")
+                # will find the coresponding API to implement ROCm version as below
+            else:
+                import pynvml
 
-            pynvml.nvmlInit()
+                pynvml.nvmlInit()
 
-            local_rank = int(os.environ["RANK"]) % args.num_gpus_per_node
+                local_rank = int(os.environ["RANK"]) % args.num_gpus_per_node
 
-            handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
-            pynvml.nvmlDeviceSetCpuAffinity(handle)
+                handle = pynvml.nvmlDeviceGetHandleByIndex(local_rank)
+                pynvml.nvmlDeviceSetCpuAffinity(handle)
 
-            print(f"Set NUMA affinity for GPU {local_rank}")
-            pynvml.nvmlShutdown()
+                logger.info(f"Set NUMA affinity for GPU {local_rank}")
+                pynvml.nvmlShutdown()
 
         except ImportError:
-            print(f"Warning: pynvml not available, skipping NUMA affinity setup")
+            logger.info(f"Warning: pynvml not available, skipping NUMA affinity setup")
         except Exception as e:
-            print(f"Warning: Failed to set NUMA affinity: {e}")
+            logger.info(f"Warning: Failed to set NUMA affinity: {e}")
+
+    def clear_memory(self):
+        print_memory("before TrainRayActor.clear_memory")
+        clear_memory()
+        print_memory("after TrainRayActor.clear_memory")
 
     @abc.abstractmethod
     def sleep(self, tags):
@@ -92,17 +115,20 @@ class TrainRayActor(RayActor):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def connect_rollout_engines(self, rollout_engines, rollout_engine_lock):
-        raise NotImplementedError
-
-    @abc.abstractmethod
     def train(self, rollout_id, rollout_data_ref):
         raise NotImplementedError
 
     @abc.abstractmethod
-    def save_model(self, iteration, with_optimizer=True):
+    def save_model(self, iteration):
         raise NotImplementedError
 
     @abc.abstractmethod
     def update_weights(self):
         raise NotImplementedError
+
+    @abc.abstractmethod
+    def connect_actor_critic(self, critic_group):
+        raise NotImplementedError
+
+    def set_rollout_manager(self, rollout_manager):
+        self.rollout_manager = rollout_manager
