@@ -235,9 +235,9 @@ def get_data_iterator(
         microbatch_group_size_per_vp_stage = config.microbatch_group_size_per_vp_stage
     cp_size = mpu.get_context_parallel_world_size()
 
-    num_local_samples = len(rollout_data["total_lengths"])
-    num_local_gbs = args.global_batch_size // dp_size
-    num_steps_per_rollout = num_local_samples // num_local_gbs
+    num_local_samples = len(rollout_data["total_lengths"])  # Total number of samples after DP split
+    num_local_gbs = args.global_batch_size // dp_size  # training global batch size on each DP rank
+    num_steps_per_rollout = num_local_samples // num_local_gbs  # local samples / local gbs is the local step
 
     def _generate_data_iterator(rollout_data, micro_batch_size, micro_batch_indices=None):
         data_iterator = []
@@ -246,6 +246,7 @@ def get_data_iterator(
         return data_iterator
 
     if not args.use_dynamic_batch_size:
+        # For each gbs, calculate the gbs // args.micro_bs so we split local gbs into smaller batch again
         num_microbatches = [num_local_gbs // args.micro_batch_size for _ in range(num_steps_per_rollout)]
         data_iterator = _generate_data_iterator(rollout_data, args.micro_batch_size)
     else:

@@ -153,6 +153,20 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
 
         # rollout
         def add_rollout_arguments(parser):
+            ##################
+            # Buffer Options #
+            ##################
+            parser.add_argument(
+                "--train-complete-traj",
+                action="store_true",
+                default=False
+            )
+            parser.add_argument(
+                "--num-training-groups",
+                type=int,
+                default=1
+            )
+            
             #################################
             # ADD Custom Dynamic Filter ags #
             #################################

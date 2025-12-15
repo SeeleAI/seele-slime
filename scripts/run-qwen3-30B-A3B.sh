@@ -32,17 +32,19 @@ CKPT_ARGS=(
    --hf-checkpoint /root/agent_ckpt/Qwen3-Coder-30B-A3B-Instruct/
    #--hf-checkpoint /root/Qwen3-30B-A3B-FP8
    --ref-load /root/agent_ckpt/Qwen3_torch_dist
-   --load /root/agent_ckpt/Qwen3-30B-A3B_slime/
-   --save /root/agent_ckpt/Qwen3-30B-A3B_slime/
-   --save-interval 20
+   --load /root/agent_ckpt/Qwen3-30B-A3B_full_traj/
+   --save /root/agent_ckpt/Qwen3-30B-A3B_full_traj/
+   --save-interval 50
 )
 
 ROLLOUT_ARGS=(
    --rollout-function-path gym_rollout.generate_rollout
    # --save-debug-rollout-data debug_rollout
    # --load-debug-rollout-data debug_rollout
+   --train-complete-traj
+   --num-training-groups 4
    --filter-zero-advantage
-   --max-turns 40
+   --max-turns 45
    --prompt-data /root/seele-agent/agent_gym_data.jsonl
    --input-key prompt
    --label-key label
@@ -50,9 +52,9 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
    --rm-type deepscaler
    --num-rollout 3000
-   --rollout-batch-size 32
+   --rollout-batch-size 32  # this one is useless
    --n-samples-per-prompt 8
-   --rollout-max-response-len 8192
+   --rollout-max-response-len 12000
    --rollout-temperature 0.8
    --use-tis
    --global-batch-size 32
@@ -111,7 +113,7 @@ OPTIMIZER_ARGS=(
 WANDB_ARGS=(
    --use-wandb
    --wandb-project qwen3-30B-coder-agent
-   --wandb-group binary_reward
+   --wandb-group full-traj-truncate-45turn-12000ctx
    --wandb-key ${WANDB_KEY}
 )
 

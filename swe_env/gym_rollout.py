@@ -101,18 +101,17 @@ class GenerateState(metaclass=SingletonMeta):
     #         )
     #     self.remaining_batch_size += len(samples)
         
-def _create_error_result(original_sample: Sample, traj_id: str, pg_id: str, error_msg: str, advantage: float=0.0) -> List[Sample]:
+def _create_error_result(original_sample: Sample, traj_id: str, pg_id: str, error_msg: str) -> List[Sample]:
     """Creates a dummy sample to return on critical failure."""
     return [Sample(
         index=original_sample.index,
         prompt=original_sample.prompt,
-        tokens=[1, 1],
-        rollout_log_probs=[0.0],
-        loss_mask=[0],
+        tokens=[],
+        rollout_log_probs=[],
+        loss_mask=[],
         response="",
-        response_length=1,
+        response_length=0,
         reward=0.0,
-        advantage=advantage,
         status=original_sample.status,
         metadata={
             "trajectory_id": traj_id,
@@ -200,8 +199,8 @@ async def generate(
     state = GenerateState(args)
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
     
-    MAX_TURNS = getattr(args, 'max_turns', 45)
-    MAX_LEN = getattr(args, 'rollout_max_response_len', 12000)
+    MAX_TURNS = getattr(args, 'max_turns', 40)
+    MAX_LEN = getattr(args, 'rollout_max_response_len', 4096)
     VIRTUAL_MEMORY = MAX_LEN - 1024
 
     assert (
@@ -450,6 +449,7 @@ def compute_group_advantages(
 
     return raw_rewards
 
+
 async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
     """
     异步生成rollout数据，返回List[Sample]
@@ -459,16 +459,7 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
     total_memory_tool_times = 0
     success_times = 0
     number_of_samples = 0
-    if args.train_complete_traj:
-        assert args.num_training_groups is not None, f"Should set args.num_training_groups when training with complete trajectories!"
-    def traj_level_target():
-        return data_source.get_step_buffer_length() < target_size
-    def group_level_target():
-        return data_source.get_step_buffer_num_groups() < args.num_training_groups
-    
-    condition_func = traj_level_target if not args.train_complete_traj else group_level_target
-    
-    while condition_func():
+    while data_source.get_step_buffer_length() < target_size:
         # get just one sample, but this sample is repeated for n_samples_per_prompt times
         # for group generation. Note that, the original buffer in SLIME is useless.
         prompt_groups = data_source.get_samples(1)
@@ -524,34 +515,7 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
               f"buffer size: {data_source.get_step_buffer_length()}")
     
     # 从buffer取出需要的数量
-    if not args.train_complete_traj:
-        final_samples = data_source.get_steps_from_buffer(target_size)
-    else:
-        final_samples = data_source.get_complete_traj(args.num_training_groups)
-        original_len = len(final_samples)
-        # Pad to multiplier of global batch size, is it safe?
-        remainder = len(final_samples) % args.global_batch_size
-        if not remainder == 0:
-            pad_len = args.global_batch_size - remainder
-            pad_sample = _create_error_result(
-                final_samples[0], 
-                final_samples[0].metadata["trajectory_id"], 
-                final_samples[0].metadata["prompt_group_id"],
-                "pad"
-            )
-            final_samples.extend(pad_sample * pad_len)
-            print(f"Original length {original_len}, padded to {len(final_samples)}")
-            
-    debug_traj = None
-    valid_samples = 0
-    for sample in final_samples:
-        if len(sample.messages) > 0:
-            # find the first valid sample
-            if not debug_traj:
-                debug_traj = sample.messages
-            # else count valid samples (with real trajectories)
-            valid_samples += 1
-    print(state.tokenizer.apply_chat_template(debug_traj, add_generation_prompt=False, tokenize=False))
+    final_samples = data_source.get_steps_from_buffer(target_size)
     success_rate = success_times / number_of_samples if number_of_samples > 0 else 0
     trajectory_ids = set()
     prompt_group_ids = set()
@@ -564,8 +528,7 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
         "rollout/memory_tool_times": total_memory_tool_times,
         "rollout/num_trajectories": len(trajectory_ids),
         "rollout/num_prompt_groups": len(prompt_group_ids),
-        "rollout/avg_steps_per_trajectory": total_steps / len(trajectory_ids) if trajectory_ids else 0,
-        "rollout/valid_samples_ratio": valid_samples / total_steps
+        "rollout/avg_steps_per_trajectory": total_steps / len(trajectory_ids) if trajectory_ids else 0
     }
     return RolloutFnTrainOutput(samples=final_samples, metrics=metrics)
 

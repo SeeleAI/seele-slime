@@ -85,11 +85,52 @@ class GymRolloutDataSource(RolloutDataSourceWithBuffer):
         self.step_buffer = self.step_buffer[num_steps:]
         return result
     
+    def get_complete_traj(self, num_groups: int) -> List[Sample]:
+        if not self.step_buffer:
+            print(f"Warning, no trajectories in buffer!")
+            return []
+        
+        # 1. Use a dictionary to group samples by ID in O(N) time
+        grouped_samples = defaultdict(list)
+        
+        # Iterate through the buffer once
+        for sample in self.step_buffer:
+            group_id = sample.metadata["prompt_group_id"] # Fixed typo
+            grouped_samples[group_id].append(sample)
+        
+        # 2. Extract the groups
+        # Depending on requirements, you might want to slice specific groups
+        # or just take all of them. Here we take the first 'num_groups' keys found.
+        all_result = []
+        
+        # We convert keys to a list to handle slicing
+        target_group_ids = list(grouped_samples.keys())[:num_groups]
+        
+        for group_id in target_group_ids:
+            all_result.extend(grouped_samples[group_id])
+            
+        # 3. Handle buffer cleanup
+        processed_ids = set(target_group_ids)
+        self.step_buffer = [
+            s for s in self.step_buffer 
+            if s.metadata["prompt_group_id"] not in processed_ids
+        ]
+
+        return all_result
+    
     def get_step_buffer_length(self) -> int:
         """
         获取step_buffer中的样本数量
         """
         return len(self.step_buffer)
+    
+    def get_step_buffer_num_groups(self) -> int:
+        """Get the number of groups in the buffer"""
+        all_group_ids = set()
+        for sample in self.step_buffer:
+            all_group_ids.add(sample.metadata["prompt_group_id"])
+            
+        return len(all_group_ids)
     
     def save(self, rollout_id):
         """

@@ -23,7 +23,7 @@ MODEL_ARGS=(
    --num-layers 48
    --hidden-size 2048
    --ffn-hidden-size 5472
-
+   # 5472
    --normalization RMSNorm
    --position-embedding-type rope
    --norm-epsilon 1e-6
