@@ -381,7 +381,7 @@ async def generate(
             None, observation
         )
         observation['content'] += budget_msg
-        
+        sample.messages[-1]["content"] += budget_msg
         # Tokenize ONLY the new observation to append to current_tokens
         # Note: We take the last message which is the Observation from Env
         # Lynx: this method is verified, it's exactly the new token when
@@ -542,16 +542,17 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
             final_samples.extend(pad_sample * pad_len)
             print(f"Original length {original_len}, padded to {len(final_samples)}")
             
-    debug_traj = None
+    debug_sample = None
     valid_samples = 0
     for sample in final_samples:
         if len(sample.messages) > 0:
             # find the first valid sample
-            if not debug_traj:
-                debug_traj = sample.messages
+            if not debug_sample:
+                debug_sample = sample
             # else count valid samples (with real trajectories)
             valid_samples += 1
-    print(state.tokenizer.apply_chat_template(debug_traj, add_generation_prompt=False, tokenize=False))
+    print(f"Prompt: {debug_sample.prompt}")
+    print(f"Response: {debug_sample.response}")
     success_rate = success_times / number_of_samples if number_of_samples > 0 else 0
     trajectory_ids = set()
     prompt_group_ids = set()

@@ -24,7 +24,7 @@ from slime.utils.types import Sample
 
 from slime.rollout.rm_hub import async_rm, batched_async_rm
 
-from train_env_python import Env, EnvConfig
+from swe_env.environment import SWEEnv
 from dataclasses import dataclass, field
 from rollout_buffer import GymRolloutDataSource
 import uuid
@@ -133,7 +133,13 @@ def _update_sample_stats(sample: Sample, logprobs: List[float], tokens: List[int
     sample.rollout_log_probs.append(0.0)
     sample.loss_mask.append(0)
     
-def _inject_token_budget(sample: Sample, total_memory: int, tokenizer, messages: List[dict] = None, observation: dict = None):
+def _inject_token_budget(
+    sample: Sample, 
+    total_memory: int, 
+    tokenizer, messages: List[dict] = None, 
+    observation: dict = None, 
+    tool_set: list = None
+):
     """Calculates used tokens and injects the budget string into the last message."""
     # Test with this message
     # Lynx: I think this is not exactly correct
@@ -150,7 +156,7 @@ def _inject_token_budget(sample: Sample, total_memory: int, tokenizer, messages:
         _message = messages[:-1] + [messages[-1].copy()]
         # Estimate the input length
         _message[-1]['content'] += test_msg
-        input_tokens = tokenizer.apply_chat_template(_message, tokenize=True, add_generation_prompt=True)
+        input_tokens = tokenizer.apply_chat_template(_message, tokenize=True, add_generation_prompt=True, tools=tool_set)
         input_token_len = len(input_tokens)
     # The provided media is a dict observation (role user)
     elif observation is not None:
@@ -211,15 +217,15 @@ async def generate(
     assert isinstance(sample.prompt, str), f"Multimodal rollout is not supported!"
     # Lynx: Need to do careful investigation on how to adapt this function
     assert not args.use_rollout_routing_replay, f"Routing replay not supported!"
-    
-    env = Env()
-    env_config = EnvConfig(image_name=sample.metadata["env_name"])
-    print(f"Initializing Environment {env_config}")
 
     try:
-        system_messages = env.reset(env_config)
+        env = SWEEnv(task_instance=sample.metadata["task_instance"], run_id=trajectory_id)
+        print(f"Initializing Environment...")
+        task_suit = env.get_initial_prompt()
+        system_messages = task_suit["message"]
+        tool_set = task_suit["tools"]
     except Exception as e:
-        print(f"Error resetting environment {sample.metadata['env_name']}: {e}")
+        print(f"Error resetting environment {sample.metadata['task_instance']['instance_id']}: {e}")
         return RolloutStatus(
             samples=_create_error_result(sample, trajectory_id, prompt_group_id, "Environment initialization failed"),
             memory_tool_times=0,
@@ -241,18 +247,20 @@ async def generate(
         
     # Fresh sample
     if not len(sample.response) > 0:
-        init_message = system_messages + [{"role": "user", "content": env.task_prompt}]
-        budget_msg = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, init_message, None)
+        init_message = system_messages
+        budget_msg = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, init_message, None, tool_set)
         init_message[-1]['content'] += budget_msg
         prompt_token_ids = state.tokenizer.apply_chat_template(
             init_message,
             add_generation_prompt=True,
             tokenize=True,
+            tools=tool_set
         )
         prompt = state.tokenizer.apply_chat_template(
             init_message,
             add_generation_prompt=True,
             tokenize=False,
+            tools=tool_set
         )
         sample.prompt = prompt
         sample.messages = init_message
@@ -310,11 +318,12 @@ async def generate(
         loop = asyncio.get_running_loop()
         step_result = await loop.run_in_executor(None, env.step, sample.messages)
         env_duration = time.time() - env_start
-        if env_duration > FORCE_DROP_TIME:
-            print(f"Force drop: Env step took {env_duration}s > {FORCE_DROP_TIME}s")
-            sample.status = Sample.Status.TRUNCATED
-            loop_state.reward = 0.0
-            break
+        # Lynx: Do not punish unit test time!!!
+        # if env_duration > FORCE_DROP_TIME:
+        #     print(f"Force drop: Env step took {env_duration}s > {FORCE_DROP_TIME}s")
+        #     sample.status = Sample.Status.TRUNCATED
+        #     loop_state.reward = 0.0
+        #     break
         
         if step_result.reward is not None:
             loop_state.reward += step_result.reward
@@ -334,6 +343,8 @@ async def generate(
             collected_samples.append(sample)
             if step_result.success:
                 status.trajectory_success = True
+                
+            print(f"Trajectory {trajectory_id} done, task_success {step_result.success}")
             break
         
         # 5. Handle Context Swap (Memory Tool)
@@ -354,26 +365,26 @@ async def generate(
             })
             collected_samples.append(archived_sample)
 
-            # Reset Loop State with new context, step_result.next_observation includes only the swapped context
-            sample = _create_reset_sample(sample, step_result.next_observation)
+            # Reset Loop State with new context, step_result.updated_message includes only the swapped context
+            sample = _create_reset_sample(sample, step_result.updated_message)
             # Inject budget token again
-            budget_msg = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, sample.messages, None)
+            budget_msg = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, sample.messages, None, tool_set)
             sample.messages[-1]['content'] += budget_msg
             # Re-tokenize entire new context
             sample.tokens = state.tokenizer.apply_chat_template(
-                sample.messages, add_generation_prompt=True, tokenize=True
+                sample.messages, add_generation_prompt=True, tokenize=True, tools=tool_set
             )
             # Set swapped context as the new prompt
             sample.prompt = state.tokenizer.apply_chat_template(
-                sample.messages, add_generation_prompt=True, tokenize=False
+                sample.messages, add_generation_prompt=True, tokenize=False, tools=tool_set
             )
             initial_prompt_len = len(sample.tokens) # Reset baseline
             continue
         
         # 6. Prepare for Next Turn (Standard Continuation)
-        sample.messages = step_result.next_observation
+        sample.messages = step_result.updated_message
         # Lynx: Shallow copy to avoid in-place modification
-        observation = step_result.next_observation[-1].copy()
+        observation = step_result.updated_message[-1].copy()
         # Inject Token Budget
         budget_msg = _inject_token_budget(
             sample, VIRTUAL_MEMORY, state.tokenizer,
@@ -403,12 +414,16 @@ async def generate(
             break
         
     env.close()
+    # if collected_samples:
+    #     for _sample in collected_samples:
+    #         print(state.tokenizer.decode(_sample.tokens))
     
     # --- Finalization ---
     if not collected_samples or not status.task_finished:
         # If no trajectory generated or the task is not finished,
         # the collected_samples may contain unneccessary swap out samples
         # we do not intend to train them
+        print(f"Task not finished or max turn exceeded.")
         error_sample = _create_error_result(sample, trajectory_id, prompt_group_id, "No samples generated")
         collected_samples = error_sample
     else:

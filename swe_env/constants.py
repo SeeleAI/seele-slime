@@ -1,4 +1,26 @@
-SYS_PROMPT = "You are a helpful assistant that can interact with a computer to solve tasks."
+# SYS_PROMPT = (
+#     "You are a helpful assistant that can interact with a computer to solve tasks. "
+#     "Meanwhile, you must efficiently manage your limited token budget. In each round of conversation, "
+#     "the user will inform you of the remaining token budget. Once you realize that your remaining token "
+#     "budget is low, or that upcoming responses or tool call returns may exceed the token budget, "
+#     "you should consider call ClearContextTool to clear the context. When you decide to invoke the ClearContextTool, think carefully. "
+#     "The epxerience and instruction should retain sufficient detailed information so that you can continue with the task "
+#     "even after the context is cleared."
+# )
+SYS_PROMPT = (
+    "You are a helpful assistant that can interact with a computer to solve tasks. "
+    "The user will inform you of the remaining token budget. You must efficiently manage your limited token budget. \n\n"
+    "CRITICAL MEMORY MANAGEMENT RULE:\n"
+    "You are strictly prohibited from calling the ClearContextTool UNLESS your "
+    "remaining token budget is CRITICALLY LOW (e.g., less than 10% remaining). "
+    "Do NOT use this tool to 'checkpoint' or 'save' your progress if you still have plenty of "
+    "tokens available. Using this tool wipes your short-term memory, which is dangerous "
+    "and should be a last resort to prevent crashing."
+)
+
+# SYS_PROMPT = (
+#     "You are a helpful assistant that can interact with a computer to solve tasks. "
+# )
 
 def get_user_prompt(working_dir: str, task_context: str):
     prompt = (
@@ -9,7 +31,7 @@ f"""
 I've uploaded a python code repository in the directory {working_dir}. Consider the following PR description:
 
 <pr_description>
-{task_context['problem_statement']}
+{task_context}
 </pr_description>
 
 Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
@@ -20,21 +42,44 @@ When executing multi-line Python code, the use of python3 -c is strictly prohibi
 
 If you find ModuleNotFoundError, try install with `pip install -e .` first. But usually I already installed all required dependencies.
 
-When you think you have resolved the problem, generate a .diff file that can be applied to this repository, output the content of the .diff file in the followng format EXACTLY:
-<final>
-(Content of the .diff file)
-<final>
+When you think you have resolved the problem, generate a .diff file that can be applied to this repository.
+
+CRITICAL INSTRUCTION FOR SUBMITTING PATCHES: You are prone to math errors when writing .diff files manually (e.g., incorrect line counts in hunk headers). Do not write the diff text yourself.
+
+Follow this exact sequence to submit:
+
+Generate: Run git diff > changes.patch in the shell. 
+
+Locate and submit: Locate the file path and submit the ABSOLUTE file path to SubmitTool.
 """
     )
     return prompt
 
 def get_tool():
     MEM_TOOL_DESC = (
-        "Summarize the conversation and flush history except the system prompt. "
-        "It returns a minimal context: [system, user(summary)]."
-        "<WARNING> This tool will flush all the history messages, including the "
-        "initial user requests, please summarize with adaquate information carefully. </WARNING>"
+        "EMERGENCY ONLY. A tool for freeing up memory when you are about to run out of tokens. "
+        "Calling this DELETES all conversation history. "
+        "Only call this if you calculate that the next step will exceed your remaining token limit. "
     )
+    # tools = [
+    #     {
+    #         "type": "function",
+    #         "function": {
+    #             "name": "BashTool",
+    #             "description": "Interact with a Linux terminal with bash",
+    #             "parameters": {
+    #                 "type": "object",
+    #                 "required": ["command"],
+    #                 "properties": {
+    #                     'command': {
+    #                         'type': 'text',
+    #                         'description': 'Any bash command.'
+    #                     }
+    #                 },
+    #             }
+    #         }
+    #     }
+    # ]
     tools = [
         {
             "type": "function",
@@ -56,20 +101,85 @@ def get_tool():
         {
             "type": "function",
             "function": {
-                "name": "MemoryTool",
+                "name": "ClearContextTool",
                 "description": MEM_TOOL_DESC,
                 "parameters": {
                     "type": "object",
-                    "required": ["context"],
+                    "required": ["next_session_context"],
                     "properties": {
-                        'context': {
+                        'next_session_context': {
                             'type': "text",
-                            'description': "Summary of the conversation history."
+                            'description': (
+                                "A comprehensive, standalone summary of the state of the world. "
+                                "This string will be the ONLY memory available to you after the reset. "
+                                "Summary with this format:\n# What I Did\nWhat I Should Do Next"
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "SubmitTool",
+                "description": "Submit the final .diff file content with this tool to fix the bug.",
+                "parameters": {
+                    "type": "object",
+                    "required": ["patch_path"],
+                    "properties": {
+                        'patch_path': {
+                            'type': "text",
+                            'description': "The path to changes.patch."
                         }
                     }
                 }
             }
         }
     ]
+    # tools = [
+    #     {
+    #         "type": "function",
+    #         "function": {
+    #             "name": "BashTool",
+    #             "description": "Interact with a Linux terminal with bash",
+    #             "parameters": {
+    #                 "type": "object",
+    #                 "required": ["command"],
+    #                 "properties": {
+    #                     'command': {
+    #                         'type': 'text',
+    #                         'description': 'Any bash command.'
+    #                     }
+    #                 },
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "type": "function",
+    #         "function": {
+    #             "name": "SwapTool",
+    #             "description": MEM_TOOL_DESC,
+    #             "parameters": {
+    #                 "type": "object",
+    #                 "required": ["user_request", "what_i_did", "what_i_should_do_next"],
+    #                 "properties": {
+    #                     'user_request': {
+    #                         'type': "text",
+    #                         'description': "Summary of the user request, should include as many details as possible."
+    #                     },
+    #                     'what_i_did': {
+    #                         'type': "text",
+    #                         'description': "Summary of what you have done for completing the task."
+    #                     },
+    #                     'what_i_should_do_next':{
+    #                         'type': "text",
+    #                         'description': "Give brief instruction of what you should do after the context is replaced."
+    #                     }
+    #                 }
+    #             }
+    #         }
+    #     }
+    # ]
     
     return tools
