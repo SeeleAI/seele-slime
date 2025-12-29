@@ -42,15 +42,9 @@ When executing multi-line Python code, the use of python3 -c is strictly prohibi
 
 If you find ModuleNotFoundError, try install with `pip install -e .` first. But usually I already installed all required dependencies.
 
-When you think you have resolved the problem, generate a .diff file that can be applied to this repository.
-
-CRITICAL INSTRUCTION FOR SUBMITTING PATCHES: You are prone to math errors when writing .diff files manually (e.g., incorrect line counts in hunk headers). Do not write the diff text yourself.
-
-Follow this exact sequence to submit:
-
-Generate: Run git diff > changes.patch in the shell. 
-
-Locate and submit: Locate the file path and submit the ABSOLUTE file path to SubmitTool.
+When you think you have resolved the problem, Follow this exact sequence to submit:
+1. Run git diff > changes.patch. 
+2. Submit the ABSOLUTE file path of the changes.patch to SubmitTool.
 """
     )
     return prompt

@@ -256,6 +256,7 @@ class SWEEnv:
 
             elif name == "BashTool":
                 command = args.get("command")
+                print(f"{self.run_id} executing command {command}")
                 observation = asyncio.run(execute_in_container(self.container, command))
                 formatted_obs = f"Tool Execution Result:\n{observation}"
                 self._append_user_message(formatted_obs)
@@ -298,6 +299,7 @@ class SWEEnv:
         """
         Parses model output, extracts a patch, and runs evaluation.
         """
+        print(f"Evaluating {run_id}")
         # 1. read the file from docker
         file_path = model_output
         command = f"cat {file_path}"
@@ -327,7 +329,7 @@ class SWEEnv:
         # Success requires status to be completed AND resolved to be True
         is_success = result.get("resolved", False)
         print("*"*100)
-        print(f"Evaluating {run_id}\n {content}\nSuccess {is_success}")
+        print(f"{content}\nSuccess {is_success}")
         print("*"*100)
 
         return {"success": is_success, "completed": True}
@@ -336,15 +338,33 @@ class SWEEnv:
         """Helper to append a message safely."""
         self.history.append({"role": "user", "content": content})
 
+    # def close(self):
+    #     """Clean up resources."""
+    #     # Lynx: Should we use cleanup_container from swebench/harness/docker_utils.py?
+    #     if self.container:
+    #         try:
+    #             self.container.stop()
+    #             self.container.remove()
+    #             print("Container stopped and removed.")
+    #         except Exception as e:
+    #             print(f"Error cleaning up container: {e}")
+    #         finally:
+    #             time.sleep(2) # Grace period
+
+    #Kerwin: 修改 close 方法，防止重复调用
     def close(self):
         """Clean up resources."""
-        # Lynx: Should we use cleanup_container from swebench/harness/docker_utils.py?
-        if self.container:
-            try:
-                self.container.stop()
-                self.container.remove()
-                print("Container stopped and removed.")
-            except Exception as e:
-                print(f"Error cleaning up container: {e}")
-            finally:
-                time.sleep(2) # Grace period
+        if self.container is None:
+            return  # 已清理，直接返回
+        
+        try:
+            self.container.reload()  # 检查容器是否存在
+            self.container.stop()
+            self.container.remove()
+            print("Container stopped and removed.")
+        except Exception as e:
+            # 容器可能已被 run_evaluation 清理
+            print(f"Container cleanup: {e}")
+        finally:
+            self.container = None  # 标记已清理，防止重复调用
+            time.sleep(2)
