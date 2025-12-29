@@ -157,6 +157,8 @@ def _init_wandb_common():
     wandb.define_metric("eval/step")
     wandb.define_metric("eval/*", step_metric="eval/step")
     wandb.define_metric("perf/*", step_metric="rollout/step")
+    # Swap out metrics for long-context summarization monitoring
+    wandb.define_metric("swap_out/*", step_metric="rollout/step")
 
 
 def get_wandb_offline_dir(args):

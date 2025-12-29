@@ -514,7 +514,12 @@ def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_
     if args.load_debug_rollout_data:
         return
 
-    log_dict = {**(rollout_extra_metrics or {})}
+    # 分离数值 metrics 和内部文本数据（避免污染 W&B 数值 metrics）
+    rollout_extra_metrics = rollout_extra_metrics or {}
+    swap_infos = rollout_extra_metrics.pop("_swap_infos", [])
+    sampled_trajectory = rollout_extra_metrics.pop("_sampled_trajectory", None)
+    
+    log_dict = {**rollout_extra_metrics}
     response_lengths = [sample.effective_response_length for sample in samples]
     log_dict["perf/rollout_time"] = rollout_time
     if args.rollout_num_gpus:
@@ -524,7 +529,73 @@ def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_
     logger.info(f"perf {rollout_id}: {log_dict}")
     step = compute_rollout_step(args, rollout_id)
     log_dict["rollout/step"] = step
+    
+    # 记录 W&B Table 文本数据（在 tracking_utils.log 之前）
+    if getattr(args, 'use_wandb', False):
+        _log_wandb_swap_data(rollout_id, swap_infos, sampled_trajectory)
+    
     tracking_utils.log(args, log_dict, step_key="rollout/step")
+
+
+def _log_wandb_swap_data(rollout_id: int, swap_infos: list, sampled_trajectory: dict):
+    """记录 swap out 文本数据到 W&B Tables，用于监控长上下文总结质量"""
+    try:
+        import wandb
+        if wandb.run is None:
+            return
+        
+        # 1. Swap Out Info Table（每次 swap 的详细信息）
+        if swap_infos:
+            swap_table = wandb.Table(
+                columns=[
+                    "rollout_id", "trajectory_id", "turn",
+                    "tokens_before", "tokens_after", "compression_ratio",
+                    "content_preview"
+                ],
+                data=[
+                    [
+                        rollout_id,
+                        info.get("trajectory_id", ""),
+                        info.get("turn_number", 0),
+                        info.get("tokens_before", 0),
+                        info.get("tokens_after", 0),
+                        round(info.get("compression_ratio", 0), 2),
+                        info.get("content_preview", "")[:500],
+                    ]
+                    for info in swap_infos
+                ]
+            )
+            wandb.log({"swap_out/details_table": swap_table})
+        
+        # 2. Sampled Trajectory（随机采样的完整轨迹）
+        if sampled_trajectory:
+            wandb.log({
+                "swap_out/sampled_traj_steps": sampled_trajectory.get("num_steps", 0),
+                "swap_out/sampled_traj_has_swap": int(sampled_trajectory.get("has_swap", False)),
+                "swap_out/sampled_traj_reward": sampled_trajectory.get("reward", 0),
+                "swap_out/sampled_traj_success": int(sampled_trajectory.get("success", False)),
+            })
+            
+            # 使用 wandb.Table 按消息拆分，保留完整内容
+            if sampled_trajectory.get("messages"):
+                messages = sampled_trajectory.get("messages", [])
+                traj_table = wandb.Table(
+                    columns=["rollout_id", "trajectory_id", "msg_index", "role", "content"],
+                    data=[
+                        [
+                            rollout_id,
+                            sampled_trajectory.get("trajectory_id", ""),
+                            i,
+                            msg.get("role", "unknown"),
+                            msg.get("content", ""),  # 不截断，保留完整消息内容
+                        ]
+                        for i, msg in enumerate(messages)
+                    ]
+                )
+                wandb.log({"swap_out/sampled_trajectory_table": traj_table})
+    
+    except Exception as e:
+        logger.warning(f"Failed to log W&B swap data: {e}")
 
 
 def _compute_metrics_from_samples(args, samples):

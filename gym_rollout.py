@@ -44,6 +44,8 @@ class RolloutStatus:
     memory_tool_times: int = field(default=0)
     trajectory_success: bool = field(default=False)
     task_finished: bool = field(default=False)
+    # W&B Swap Out Metrics: 记录每次 swap 的详细信息
+    swap_out_infos: List[dict] = field(default_factory=list)
 
 @dataclass
 class LoopState:
@@ -187,6 +189,68 @@ def remove_eos_token(tokenizer, txt: str):
             return txt[:-len(token)]
         
     return txt
+
+
+def _extract_content_preview(messages: List[dict], max_chars: int = 1000) -> str:
+    """提取 swap 后新 context 的内容预览，用于 W&B Table 记录
+    
+    设计依据：
+    - 保留最后 3 条消息作为上下文快照
+    - 每条消息截断 300 字符避免过长
+    - 总长度限制 1000 字符
+    """
+    if not messages:
+        return ""
+    
+    parts = []
+    for msg in messages[-3:]:  # 最后 3 条消息
+        role = msg.get("role", "unknown")
+        content = str(msg.get("content", ""))[:300]
+        parts.append(f"[{role}]: {content}")
+    
+    return "\n---\n".join(parts)[:max_chars]
+
+
+def _sample_random_trajectory(samples: List[Sample], tokenizer) -> Optional[dict]:
+    """随机选择一个完整轨迹用于 W&B 记录，监控 swap 内容质量
+    
+    用途：定性分析 swap 后的内容是否：
+    1. 完整保留用户需求
+    2. 详细列出已做的事情
+    3. 历史经验不过于冗余
+    4. 有明确的下一步指示
+    """
+    import random
+    
+    # 按 trajectory_id 分组
+    trajectories = defaultdict(list)
+    for s in samples:
+        traj_id = s.metadata.get("trajectory_id")
+        # Sample dataclass 总是有 messages 字段
+        if traj_id and s.messages and len(s.messages) > 0:
+            trajectories[traj_id].append(s)
+    
+    if not trajectories:
+        return None
+    
+    # 随机选择一个轨迹
+    selected_traj_id = random.choice(list(trajectories.keys()))
+    selected_samples = trajectories[selected_traj_id]
+    
+    # 取最后一个 sample 的完整 messages
+    final_sample = selected_samples[-1]
+    
+    return {
+        "trajectory_id": selected_traj_id,
+        "num_steps": len(selected_samples),
+        "has_swap": any(s.metadata.get("context_modified") for s in selected_samples),
+        "reward": final_sample.reward,
+        "success": final_sample.reward > 0 if final_sample.reward else False,
+        "messages": final_sample.messages,  # 原始消息列表，供 wandb.Table 使用
+        "messages_text": tokenizer.apply_chat_template(
+            final_sample.messages, add_generation_prompt=False, tokenize=False
+        ) if final_sample.messages else "",
+    }
 
 # Lynx: First turn bug fix done with Gemini
 async def generate(
@@ -339,8 +403,10 @@ async def generate(
         
         # 5. Handle Context Swap (Memory Tool)
         if step_result.modified_context:
-            # breakpoint()
             status.memory_tool_times += 1
+            
+            # W&B Metrics: 记录 swap 前的 token 数量
+            tokens_before = len(sample.tokens)
             
             # Archive current sample
             archived_sample = copy.deepcopy(sample)
@@ -368,7 +434,20 @@ async def generate(
             sample.prompt = state.tokenizer.apply_chat_template(
                 sample.messages, add_generation_prompt=True, tokenize=False
             )
-            initial_prompt_len = len(sample.tokens) # Reset baseline
+            initial_prompt_len = len(sample.tokens)  # Reset baseline
+            
+            # W&B Metrics: 记录 swap 后的详细信息（复用已计算的 sample.tokens，无需重复 tokenize）
+            tokens_after = len(sample.tokens)
+            swap_info = {
+                "trajectory_id": trajectory_id,
+                "turn_number": turn,
+                "tokens_before": tokens_before,
+                "tokens_after": tokens_after,
+                "compression_ratio": tokens_before / tokens_after if tokens_after > 0 else 0,
+                "content_preview": _extract_content_preview(step_result.next_observation),
+            }
+            status.swap_out_infos.append(swap_info)
+            
             continue
         
         # 6. Prepare for Next Turn (Standard Continuation)
@@ -459,6 +538,11 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
     total_memory_tool_times = 0
     success_times = 0
     number_of_samples = 0
+    
+    # W&B Swap Out Metrics: 在 while 循环外部初始化
+    all_swap_infos: List[dict] = []
+    total_trajectory_count = 0  # 记录真实的 trajectory 数量
+    
     if args.train_complete_traj:
         assert args.num_training_groups is not None, f"Should set args.num_training_groups when training with complete trajectories!"
     def traj_level_target():
@@ -500,10 +584,18 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
         trajectory_results = [raw.samples for raw in results]
         memory_tool_times = [raw.memory_tool_times for raw in results]
         success = [int(raw.trajectory_success) for raw in results]
+        
+        # W&B Swap Out Metrics: 收集 swap_out_infos
+        swap_out_infos_list = [raw.swap_out_infos for raw in results]
+        
         total_memory_tool_times += sum(memory_tool_times)
         success_times += sum(success)
         number_of_samples += len(results)
-        # breakpoint()
+        total_trajectory_count += len(results)  # 同步累加，与 total_memory_tool_times 分母一致
+        
+        # W&B Swap Out Metrics: 累加而不是重置
+        for infos in swap_out_infos_list:
+            all_swap_infos.extend(infos)
         # trajectory_results: List[List[Sample]], one group in GRPO
         # The first List is N trajectories, the second List represents
         # possible swap out
@@ -560,14 +652,47 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
     for sample in final_samples:
         trajectory_ids.add(sample.metadata["trajectory_id"])
         prompt_group_ids.add(sample.metadata["prompt_group_id"])
+    # W&B Swap Out Metrics: 计算 swap out 相关指标
+    swap_out_sample_count = sum(
+        1 for s in final_samples if s.metadata.get("context_modified", False)
+    )
+    
+    avg_swap_content_length = 0.0
+    avg_compression_ratio = 0.0
+    avg_swap_turn_number = 0.0
+    if all_swap_infos:
+        avg_swap_content_length = sum(info["tokens_after"] for info in all_swap_infos) / len(all_swap_infos)
+        avg_compression_ratio = sum(info["compression_ratio"] for info in all_swap_infos) / len(all_swap_infos)
+        # 平均在第几个 turn 发生 swap
+        avg_swap_turn_number = sum(info["turn_number"] for info in all_swap_infos) / len(all_swap_infos)
+    
+    # 每条轨迹平均 swap 次数（使用 total_trajectory_count 确保分母一致）
+    swap_frequency_per_trajectory = (
+        total_memory_tool_times / total_trajectory_count if total_trajectory_count > 0 else 0
+    )
+    
+    # 随机采样一个完整轨迹用于质量监控
+    sampled_trajectory = _sample_random_trajectory(final_samples, state.tokenizer)
+    
     metrics = {
         "rollout/success_rate": success_rate,
         "rollout/memory_tool_times": total_memory_tool_times,
         "rollout/num_trajectories": len(trajectory_ids),
         "rollout/num_prompt_groups": len(prompt_group_ids),
         "rollout/avg_steps_per_trajectory": total_steps / len(trajectory_ids) if trajectory_ids else 0,
-        "rollout/valid_samples_ratio": valid_samples / total_steps
+        "rollout/valid_samples_ratio": valid_samples / total_steps if total_steps > 0 else 0,
+        # W&B Swap Out Metrics: 新增指标
+        "rollout/swap_out_sample_ratio": swap_out_sample_count / total_steps if total_steps > 0 else 0,
+        "rollout/avg_swap_content_length": avg_swap_content_length,
+        "rollout/swap_compression_ratio": avg_compression_ratio,
+        "rollout/swap_frequency_per_trajectory": swap_frequency_per_trajectory,
+        "rollout/avg_swap_turn_number": avg_swap_turn_number,
     }
+    
+    # 内部字段，传递给 _log_rollout_data 处理 W&B Table（以 _ 开头表示内部使用）
+    metrics["_swap_infos"] = all_swap_infos[:50]  # 限制最多 50 条
+    metrics["_sampled_trajectory"] = sampled_trajectory
+    
     return RolloutFnTrainOutput(samples=final_samples, metrics=metrics)
 
 def _call_dynamic_filter(fn, *args, **kwargs):
