@@ -513,13 +513,13 @@ def _log_eval_rollout_data(rollout_id, args, data):
 def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
     if args.load_debug_rollout_data:
         return
-
+    
     # 分离数值 metrics 和内部文本数据（避免污染 W&B 数值 metrics）
     rollout_extra_metrics = rollout_extra_metrics or {}
     swap_infos = rollout_extra_metrics.pop("_swap_infos", [])
     sampled_trajectory = rollout_extra_metrics.pop("_sampled_trajectory", None)
-    
-    log_dict = {**rollout_extra_metrics}
+
+    log_dict = {**(rollout_extra_metrics or {})}
     response_lengths = [sample.effective_response_length for sample in samples]
     log_dict["perf/rollout_time"] = rollout_time
     if args.rollout_num_gpus:
@@ -535,8 +535,7 @@ def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_
         _log_wandb_swap_data(rollout_id, swap_infos, sampled_trajectory)
     
     tracking_utils.log(args, log_dict, step_key="rollout/step")
-
-
+    
 def _log_wandb_swap_data(rollout_id: int, swap_infos: list, sampled_trajectory: dict):
     """记录 swap out 文本数据到 W&B Tables，用于监控长上下文总结质量"""
     try:

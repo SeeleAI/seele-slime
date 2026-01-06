@@ -7,16 +7,20 @@ from typing import Dict, Any, List
 import time
 import re
 import asyncio
+import base64
+import functools
 
 def swap_context(summarize: dict, messages: list[dict], user_request: str) -> list[dict]:
     assert messages[0]['role'] == "system", f"Message[0] role {messages[0]['role']} is incorrect, should be system"
     system_prompt = messages[0]
     next_session = summarize["next_session_context"]
+    think = summarize["think"]
     summary_content = (
 f"""
 # User Request
 {user_request}
 
+<Important> You just called ClearContextTool, check the message from Previous Context </Important>
 # Previous Context
 {next_session}
 """
@@ -28,130 +32,45 @@ f"""
     
     return new_message
 
-def parse_llm_diff_output(text: str):
-    """
-    Parses LLM output to extract unified diff content and identify the type of output.
-    
-    Args:
-        text (str): The raw string output from the LLM.
-        
-    Returns:
-        dict: {
-            "type": "diff_content" | "command_only" | "unknown",
-            "content": str (The clean .diff content or the command),
-            "is_valid_patch": bool (True if ready to be saved as .diff)
-        }
-    """
-    # 1. Clean Markdown code blocks (e.g., ```diff ... ```)
-    # We strip the backticks but keep the content inside
-    code_block_pattern = r"```(?:diff|bash|sh)?\n(.*?)```"
-    code_blocks = re.findall(code_block_pattern, text, re.DOTALL)
-    
-    # If code blocks exist, prioritize searching inside them
-    # Otherwise, search the whole text (the LLM might have forgotten markdown)
-    search_text = "\n".join(code_blocks) if code_blocks else text
-
-    # 2. Define patterns
-    # A standard unified diff header: 
-    # --- a/path/to/file
-    # +++ b/path/to/file
-    diff_header_pattern = re.compile(r"(^--- .*?\n\+\+\+ .*?)(?=\n|$)", re.MULTILINE)
-    
-    # A standard diff command
-    diff_cmd_pattern = re.compile(r"^\s*(diff\s+-u\s+.*|git\s+diff\s+.*)", re.MULTILINE)
-
-    # 3. extraction Logic
-    diff_match = diff_header_pattern.search(search_text)
-    
-    if diff_match:
-        # Found the start of a diff. 
-        # Extract from the '---' line to the end of the text/block
-        # Note: This includes trailing text (LLM comments). 
-        # Robust patch tools usually ignore trailing garbage, but we can try to trim.
-        start_index = diff_match.start()
-        raw_diff = search_text[start_index:]
-        
-        # Optional: Trim trailing lines that don't look like diff content
-        # (Lines that don't start with ' ', '+', '-', '@', '\', or 'index')
-        cleaned_lines = []
-        for line in raw_diff.splitlines():
-            if re.match(r"^([+\-@\\ ]|index|diff|---|\+\+\+)", line):
-                cleaned_lines.append(line)
-            else:
-                # Once we hit a line that isn't diff syntax, we stop (assuming LLM commentary follows)
-                # However, be careful not to stop on blank lines inside a diff
-                if line.strip() == "":
-                    cleaned_lines.append(line)
-                    continue
+def generate_patch(container):
+    print("Generating patch...")
+    cmd_list = [
+        'cd /testbed',
+        "git add -A",
+        "git diff --cached > /testbed/model.patch",
+        'cat /testbed/model.patch'
+    ]
+    for command in cmd_list:
+        try:
+            # Encode command to avoid shell escaping issues
+            b64_cmd = base64.b64encode(command.encode('utf-8')).decode('utf-8')
+            safe_cmd = f"bash -c 'timeout -k 5 40s bash -c \"echo {b64_cmd} | base64 -d | bash\"'"
+            
+            # Blocking call (no signal logic here)
+            exit_code, output = container.exec_run(cmd=safe_cmd)
+            
+            # Decode output
+            output_str = output.decode("utf-8", errors="replace")
+            # print(f"\n[Tool Execution Completed] {command}")
+            if exit_code != 0:
+                print(f"Error generating patch: {output_str}")   
                 break
                 
-        return {
-            "type": "diff_content",
-            "content": "\n".join(cleaned_lines),
-            "is_valid_patch": True
-        }
+            if command == cmd_list[-1]:
+                # print(f"Patch:\n{output_str}")
+                return output_str if output_str.strip() else None
+            
+        except Exception as e:
+            print(f"Error executing command: {str(e)}")
+            break
+    return None
 
-    # 4. If no diff content, check if it's just a command
-    cmd_match = diff_cmd_pattern.search(search_text)
-    if cmd_match:
-        return {
-            "type": "command_only",
-            "content": cmd_match.group(1),
-            "is_valid_patch": False
-        }
-
-    return {
-        "type": "unknown",
-        "content": "",
-        "is_valid_patch": False
-    }
-
-def parse_final_patch(model_output: str, trim_spaces: bool = True):
-    pattern = r'<final>(.*?)</final>'
-    matches = re.findall(pattern, model_output, re.DOTALL)  
-    
-    if trim_spaces:
-        matches = [match.strip() for match in matches]
-    
-    return matches
-
-# def verify_task(
-#     model_output: str, 
-#     task_instance: dict, 
-#     run_id: str, 
-#     model_name: str = "Qwen3-Coder"
-# ) -> dict:
-#     """
-#     Parses model output, extracts a patch, and runs evaluation.
-#     """
-
-#     # 3. Construct Payload
-#     prediction = {
-#         "instance_id": task_instance.get("instance_id"),
-#         "model_patch": model_output,
-#         "model_name_or_path": model_name
-#     }
-
-#     payload = {
-#         "pred": prediction,
-#         "instance": task_instance,
-#         "run_id": run_id,
-#         "f2p_only": False,
-#         "is_gold": False
-#     }
-
-#     # 4. Execute Evaluation
-#     # Lynx: run_evaluation contains auto cleanup of the container
-#     result = run_evaluation(**payload)
-
-#     # 5. Determine Success
-#     # Success requires status to be completed AND resolved to be True
-#     is_success = result.get("resolved", False)
-#     print("*"*100)
-#     print(f"Evaluating {run_id}\n {model_output}\nSuccess {is_success}")
-#     print("*"*100)
-
-#     return {"success": is_success, "completed": True}
+async def run_blocking(func, *args, **kwargs):
+    """
+    Helper to run blocking (synchronous) functions in a thread pool.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
 @dataclass
 class StepResult:
@@ -256,15 +175,13 @@ class SWEEnv:
 
             elif name == "BashTool":
                 command = args.get("command")
-                print(f"{self.run_id} executing command {command}")
+                # print(f"{self.run_id} executing command {command}")
                 observation = asyncio.run(execute_in_container(self.container, command))
                 formatted_obs = f"Tool Execution Result:\n{observation}"
                 self._append_user_message(formatted_obs)
             
             elif name == "SubmitTool":
-                patch = args.get("patch_path")
-                print(f"model submitted {patch}")
-                task_status = self._verify_task(patch, self.task_instance, self.run_id)
+                task_status = asyncio.run(self._verify_task(self.task_instance, self.run_id))
                 task_success = task_status["success"]
                 return StepResult(
                     updated_message=self.history,
@@ -289,9 +206,8 @@ class SWEEnv:
             info={"reason": "tool_executed", "tool": name}
         )
         
-    def _verify_task(
+    async def _verify_task(
         self,
-        model_output: str, 
         task_instance: dict, 
         run_id: str, 
         model_name: str = "Qwen3-Coder"
@@ -300,39 +216,47 @@ class SWEEnv:
         Parses model output, extracts a patch, and runs evaluation.
         """
         print(f"Evaluating {run_id}")
-        # 1. read the file from docker
-        file_path = model_output
-        command = f"cat {file_path}"
-        content = asyncio.run(execute_in_container(self.container, command))
+        patch = generate_patch(self.container)
+        if patch:
+            # 3. Construct Payload
+            prediction = {
+                "instance_id": task_instance.get("instance_id"),
+                "model_patch": patch,
+                "model_name_or_path": model_name
+            }
+
+            payload = {
+                "pred": prediction,
+                "instance": task_instance,
+                "run_id": run_id,
+                "f2p_only": False,
+                "is_gold": False
+            }
+
+            # 4. Execute Evaluation
+            self.close()
+            # Lynx: run_evaluation contains auto cleanup of the container
+            # Lynx: Evaluation could also run infinitely, break long eval and set it unsolved.
+            try:
+                result = await asyncio.wait_for(
+                    run_blocking(run_evaluation, **payload),
+                    timeout=60.0
+                )
+            except Exception as e:
+                print(f"Cannot evaluate due to {e}")
+                result = dict(resolved=False)
+            # result = run_evaluation(**payload)
+
+            # 5. Determine Success
+            # Success requires status to be completed AND resolved to be True
+            is_success = result.get("resolved", False)
+            print("*"*100)
+            print(f"{patch}\nSuccess {is_success}")
+            print("*"*100)
+
+            return {"success": is_success, "completed": True}
         
-        # 3. Construct Payload
-        prediction = {
-            "instance_id": task_instance.get("instance_id"),
-            "model_patch": content,
-            "model_name_or_path": model_name
-        }
-
-        payload = {
-            "pred": prediction,
-            "instance": task_instance,
-            "run_id": run_id,
-            "f2p_only": False,
-            "is_gold": False
-        }
-
-        # 4. Execute Evaluation
-        self.close()
-        # Lynx: run_evaluation contains auto cleanup of the container
-        result = run_evaluation(**payload)
-
-        # 5. Determine Success
-        # Success requires status to be completed AND resolved to be True
-        is_success = result.get("resolved", False)
-        print("*"*100)
-        print(f"{content}\nSuccess {is_success}")
-        print("*"*100)
-
-        return {"success": is_success, "completed": True}
+        return {"success": False, "completed": True}
 
     def _append_user_message(self, content: str):
         """Helper to append a message safely."""

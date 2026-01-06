@@ -42,9 +42,7 @@ When executing multi-line Python code, the use of python3 -c is strictly prohibi
 
 If you find ModuleNotFoundError, try install with `pip install -e .` first. But usually I already installed all required dependencies.
 
-When you think you have resolved the problem, Follow this exact sequence to submit:
-1. Run git diff > changes.patch. 
-2. Submit the ABSOLUTE file path of the changes.patch to SubmitTool.
+When you think you have resolved the problem, call the SubmitTool.
 """
     )
     return prompt
@@ -54,6 +52,8 @@ def get_tool():
         "EMERGENCY ONLY. A tool for freeing up memory when you are about to run out of tokens. "
         "Calling this DELETES all conversation history. "
         "Only call this if you calculate that the next step will exceed your remaining token limit. "
+        "And when you call this tool, first think step by step what information should be passed to the next "
+        "session."
     )
     # tools = [
     #     {
@@ -99,14 +99,21 @@ def get_tool():
                 "description": MEM_TOOL_DESC,
                 "parameters": {
                     "type": "object",
-                    "required": ["next_session_context"],
+                    "required": ["think", "next_session_context"],
                     "properties": {
                         'next_session_context': {
                             'type': "text",
                             'description': (
                                 "A comprehensive, standalone summary of the state of the world. "
                                 "This string will be the ONLY memory available to you after the reset. "
-                                "Summary with this format:\n# What I Did\nWhat I Should Do Next"
+                                "Summary with this format:\n# What I Did\nWhat I Should Do Next, "
+                                "put all the important information that you think is necessary."
+                            )
+                        },
+                        "think": {
+                            "type": "text",
+                            "description": (
+                                "Write your reasoning trace here, think step by step, and list in detail with bullet points what specific information you should pass on to the next session."
                             )
                         }
                     }
@@ -117,17 +124,8 @@ def get_tool():
             "type": "function",
             "function": {
                 "name": "SubmitTool",
-                "description": "Submit the final .diff file content with this tool to fix the bug.",
-                "parameters": {
-                    "type": "object",
-                    "required": ["patch_path"],
-                    "properties": {
-                        'patch_path': {
-                            'type': "text",
-                            'description': "The path to changes.patch."
-                        }
-                    }
-                }
+                "description": "Call this tool when you think you have resolved the problem.",
+                "parameters": {}
             }
         }
     ]

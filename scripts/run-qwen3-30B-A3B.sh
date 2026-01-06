@@ -32,22 +32,22 @@ CKPT_ARGS=(
    --hf-checkpoint /root/agent_ckpt/Qwen3-Coder-30B-A3B-Instruct/
    #--hf-checkpoint /root/Qwen3-30B-A3B-FP8
    --ref-load /root/agent_ckpt/Qwen3_torch_dist
-   --load /root/agent_ckpt/Qwen3-30B-A3B_full_traj/
-   --save /root/agent_ckpt/Qwen3-30B-A3B_full_traj/
+   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_finer_reward/
+   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_finer_reward/
    --save-interval 50
 )
 
 ROLLOUT_ARGS=(
-   --rollout-function-path gym_rollout.generate_rollout
+   --rollout-function-path swe_env.gym_rollout.generate_rollout
    # --rollout-function-path gym_rollout.generate_rollout
    # --save-debug-rollout-data debug_rollout
    # --load-debug-rollout-data debug_rollout
    --train-complete-traj
    --num-training-groups 4
    --filter-zero-advantage
-   --max-turns 45
-   --prompt-data /root/seele-agent/agent_gym_data.jsonl
-   # --prompt-data /root/seele-agent/swe_gym_data_2_3.jsonl
+   --max-turns 50
+   # --prompt-data /root/seele-agent/agent_gym_data.jsonl
+   --prompt-data /root/seele-agent/swe_gym_data_evaluted_12k_50turn.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -115,7 +115,7 @@ OPTIMIZER_ARGS=(
 WANDB_ARGS=(
    --use-wandb
    --wandb-project qwen3-30B-coder-agent
-   --wandb-group full-traj-truncate-45turn-12000ctx
+   --wandb-group full-traj-swe-selected-12k-50turn-bias-fix-finer-reward
    --wandb-key ${WANDB_KEY}
 )
 

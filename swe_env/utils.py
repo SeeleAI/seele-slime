@@ -4,6 +4,11 @@ import signal
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+from concurrent.futures import ThreadPoolExecutor
+
+# Use a dedicated thread pool to avoid blocking your main app
+DOCKER_EXECUTOR = ThreadPoolExecutor(max_workers=20)
+
 TIMEOUT = 40
 
 def timeout_handler(signum, frame):
@@ -88,45 +93,101 @@ def parse_tool_call(text):
 #         return f"System Error during container execution: {str(e)}"
 
 
-async def execute_in_container(container, command):
+# async def execute_in_container(container, command):
+#     """
+#     Executes command in the docker container asynchronously and handles output decoding.
+#     """
+#     try:
+#         # Prepare the safe command (same logic as before)
+#         b64_cmd = base64.b64encode(command.encode('utf-8')).decode('utf-8')
+#         # safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
+#         safe_cmd = f"bash -c 'timeout -k 5 {TIMEOUT}s echo {b64_cmd} | base64 -d | bash'"
+
+#         # Get the current asyncio loop
+#         loop = asyncio.get_running_loop()
+
+#         # Define a synchronous wrapper for the blocking docker call
+#         # We use a lambda or partial because run_in_executor doesn't support kwargs directly
+#         def _exec_blocking():
+#             return container.exec_run(cmd=safe_cmd)
+
+#         # Run the blocking call in a separate thread to avoid blocking the event loop
+#         # asyncio.wait_for handles the timeout logic natively
+#         exit_code, output = await asyncio.wait_for(
+#             loop.run_in_executor(None, _exec_blocking), 
+#             timeout=TIMEOUT
+#         )
+        
+#         # Decode output (handle potential encoding errors)
+#         output_str = output.decode("utf-8", errors="replace")
+        
+#         if exit_code != 0:
+#             return f"Command failed with exit code {exit_code}.\nOutput:\n{output_str}"
+        
+#         # Truncate very long outputs to save context window
+#         if len(output_str) > 2000:
+#             output_str = output_str[:1000] + "\n...[Output Truncated]...\n" + output_str[-1000:]
+            
+#         return output_str if output_str.strip() else "Command executed successfully with no output."
+
+#     except asyncio.TimeoutError:
+#         return f"System Error: Execution timed out after {TIMEOUT} seconds."
+        
+#     except Exception as e:
+#         return f"System Error during container execution: {str(e)}"
+
+
+async def execute_in_container(container, command, timeout=60):
     """
-    Executes command in the docker container asynchronously and handles output decoding.
+    Executes a command. If it times out, RESTARTS the container to 
+    force-kill the process and unblock the thread.
     """
+    loop = asyncio.get_running_loop()
+
+    # 1. Prepare the command
+    b64_cmd = base64.b64encode(command.encode('utf-8')).decode('utf-8')
+    # We remove the bash-level timeout because we will handle it at the container level
+    safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
+
+    # 2. Define the blocking task
+    def _exec_blocking():
+        return container.exec_run(cmd=safe_cmd)
+
     try:
-        # Prepare the safe command (same logic as before)
-        b64_cmd = base64.b64encode(command.encode('utf-8')).decode('utf-8')
-        # safe_cmd = f"bash -c 'echo {b64_cmd} | base64 -d | bash'"
-        safe_cmd = f"bash -c 'timeout -k 5 {TIMEOUT}s echo {b64_cmd} | base64 -d | bash'"
-
-        # Get the current asyncio loop
-        loop = asyncio.get_running_loop()
-
-        # Define a synchronous wrapper for the blocking docker call
-        # We use a lambda or partial because run_in_executor doesn't support kwargs directly
-        def _exec_blocking():
-            return container.exec_run(cmd=safe_cmd)
-
-        # Run the blocking call in a separate thread to avoid blocking the event loop
-        # asyncio.wait_for handles the timeout logic natively
+        # 3. Wait for result with a hard limit
         exit_code, output = await asyncio.wait_for(
-            loop.run_in_executor(None, _exec_blocking), 
-            timeout=TIMEOUT
+            loop.run_in_executor(DOCKER_EXECUTOR, _exec_blocking),
+            timeout=timeout
         )
         
-        # Decode output (handle potential encoding errors)
         output_str = output.decode("utf-8", errors="replace")
         
-        if exit_code != 0:
-            return f"Command failed with exit code {exit_code}.\nOutput:\n{output_str}"
+        # print(output_str)
         
         # Truncate very long outputs to save context window
-        if len(output_str) > 2000:
-            output_str = output_str[:1000] + "\n...[Output Truncated]...\n" + output_str[-1000:]
-            
+        if len(output_str) > 2500:
+            output_str = output_str[:1250] + "\n...[Output Truncated]...\n" + output_str[-1250:]
+        
+        if exit_code != 0:
+            return f"Command failed (Exit {exit_code}):\n{output_str}"
         return output_str if output_str.strip() else "Command executed successfully with no output."
 
     except asyncio.TimeoutError:
-        return f"System Error: Execution timed out after {TIMEOUT} seconds."
-        
+        # 4. THE FIX: Timeout occurred. 
+        # The background thread is STUCK waiting on the socket.
+        # We must kill the container to break that connection.
+        print("%"*100)
+        print(f"Container {container.short_id} timed out. Restarting to kill process...")
+        print(f"The command was {command}")
+        print("%"*100)
+        # Run the restart in a separate thread (since restart() is also blocking)
+        # timeout=5 ensures we don't hang if restart fails
+        try:
+            await loop.run_in_executor(None, lambda: container.restart(timeout=5))
+        except Exception as e:
+            return f"Critical System Error: Failed to restart container: {e}"
+
+        return f"Execution timed out after {timeout}s."
+
     except Exception as e:
-        return f"System Error during container execution: {str(e)}"
+        return f"System Error: {str(e)}"
