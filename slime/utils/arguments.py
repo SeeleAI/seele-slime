@@ -1472,11 +1472,12 @@ def slime_validate_args(args):
                 f"// num_steps_per_rollout {args.num_steps_per_rollout}"
             )
         args.global_batch_size = global_batch_size
-
-    assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
-        f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
-        f"is not a multiple of global_batch_size {args.global_batch_size}"
-    )
+        
+    # Lynx: This hypothesis breaks
+    # assert args.rollout_batch_size * args.n_samples_per_prompt % args.global_batch_size == 0, (
+    #     f"rollout_batch_size {args.rollout_batch_size} * n_samples_per_prompt {args.n_samples_per_prompt} "
+    #     f"is not a multiple of global_batch_size {args.global_batch_size}"
+    # )
 
     if args.n_samples_per_prompt == 1:
         args.grpo_std_normalization = False

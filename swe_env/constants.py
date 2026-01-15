@@ -7,15 +7,30 @@
 #     "The epxerience and instruction should retain sufficient detailed information so that you can continue with the task "
 #     "even after the context is cleared."
 # )
+# SYS_PROMPT = (
+#     "You are a helpful assistant that can interact with a computer to solve tasks. "
+#     "The user will inform you of the remaining token budget. You must efficiently manage your limited token budget. \n\n"
+#     "CRITICAL MEMORY MANAGEMENT RULE:\n"
+#     "You are strictly prohibited from calling the ClearContextTool UNLESS your "
+#     "remaining token budget is CRITICALLY LOW (e.g., less than 10% remaining). "
+#     "Do NOT use this tool to 'checkpoint' or 'save' your progress if you still have plenty of "
+#     "tokens available. Using this tool wipes your short-term memory, which is dangerous "
+#     "and should be a last resort to prevent crashing."
+# )
+
 SYS_PROMPT = (
     "You are a helpful assistant that can interact with a computer to solve tasks. "
     "The user will inform you of the remaining token budget. You must efficiently manage your limited token budget. \n\n"
-    "CRITICAL MEMORY MANAGEMENT RULE:\n"
-    "You are strictly prohibited from calling the ClearContextTool UNLESS your "
+    "CRITICAL MANAGEMENT RULE:\n"
+    "When you notice your token budget is running low, you may be unable to proceed. In this case, you must invoke the "
+    "HandoffTool to transfer your current tasks to another Agent. The primary principle of a handoff is to provide "
+    "the successor with sufficiently detailed requirements, context, and goals. The tool will guide you through completing "
+    "a handoff form, but remember: providing comprehensive information is essential for the successor to successfully "
+    "complete the work you left unfinished."
+    "You are strictly prohibited from calling the HandoffTool UNLESS your "
     "remaining token budget is CRITICALLY LOW (e.g., less than 10% remaining). "
     "Do NOT use this tool to 'checkpoint' or 'save' your progress if you still have plenty of "
-    "tokens available. Using this tool wipes your short-term memory, which is dangerous "
-    "and should be a last resort to prevent crashing."
+    "tokens available."
 )
 
 # SYS_PROMPT = (
@@ -48,87 +63,23 @@ When you think you have resolved the problem, call the SubmitTool.
     return prompt
 
 def get_tool():
+    # MEM_TOOL_DESC = (
+    #     "EMERGENCY ONLY. A tool for freeing up memory when you are about to run out of tokens. "
+    #     "Calling this DELETES all conversation history. "
+    #     "Only call this if you calculate that the next step will exceed your remaining token limit. "
+    #     "And when you call this tool, first think step by step what information should be passed to the next "
+    #     "session."
+    # )
     MEM_TOOL_DESC = (
-        "EMERGENCY ONLY. A tool for freeing up memory when you are about to run out of tokens. "
-        "Calling this DELETES all conversation history. "
-        "Only call this if you calculate that the next step will exceed your remaining token limit. "
-        "And when you call this tool, first think step by step what information should be passed to the next "
-        "session."
+        "EMERGENCY ONLY. A tool to handoff the current task to another Agent. "
+        "Crytical Rules:\n"
+        "1. Call this tool ONLY when you think you don't have enough token budget to complete the task.\n"
+        "2. Your successor has **ZERO access** to the previous conversation history, code bases, or file contents you have already read. They only see the [HANDOFF REPORT] you generate now.\n"
+        "3. If you force them to re-read a file you already read, **you fail**.\n"
+        "4. If you force them to re-test a bug you already analyzed, **you fail**.\n"
+        "5. If you write vague summaries like 'I analyzed the code,' **you fail**.\n"
+        "Generate a strict **[HANDOFF REPORT]** containing specific, actionable data. You must transfer **Knowledge**, not just a Summary."
     )
-    # tools = [
-    #     {
-    #         "type": "function",
-    #         "function": {
-    #             "name": "BashTool",
-    #             "description": "Interact with a Linux terminal with bash",
-    #             "parameters": {
-    #                 "type": "object",
-    #                 "required": ["command"],
-    #                 "properties": {
-    #                     'command': {
-    #                         'type': 'text',
-    #                         'description': 'Any bash command.'
-    #                     }
-    #                 },
-    #             }
-    #         }
-    #     }
-    # ]
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "BashTool",
-                "description": "Interact with a Linux terminal with bash",
-                "parameters": {
-                    "type": "object",
-                    "required": ["command"],
-                    "properties": {
-                        'command': {
-                            'type': 'text',
-                            'description': 'Any bash command.'
-                        }
-                    },
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "ClearContextTool",
-                "description": MEM_TOOL_DESC,
-                "parameters": {
-                    "type": "object",
-                    "required": ["think", "next_session_context"],
-                    "properties": {
-                        'next_session_context': {
-                            'type': "text",
-                            'description': (
-                                "A comprehensive, standalone summary of the state of the world. "
-                                "This string will be the ONLY memory available to you after the reset. "
-                                "Summary with this format:\n# What I Did\nWhat I Should Do Next, "
-                                "put all the important information that you think is necessary."
-                            )
-                        },
-                        "think": {
-                            "type": "text",
-                            "description": (
-                                "Write your reasoning trace here, think step by step, and list in detail with bullet points what specific information you should pass on to the next session."
-                            )
-                        }
-                    }
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "SubmitTool",
-                "description": "Call this tool when you think you have resolved the problem.",
-                "parameters": {}
-            }
-        }
-    ]
     # tools = [
     #     {
     #         "type": "function",
@@ -150,28 +101,171 @@ def get_tool():
     #     {
     #         "type": "function",
     #         "function": {
-    #             "name": "SwapTool",
+    #             "name": "SubmitTool",
+    #             "description": "Call this tool when you think you have resolved the problem.",
+    #             "parameters": {}
+    #         }
+    #     }
+    # ]
+    # tools = [
+    #     {
+    #         "type": "function",
+    #         "function": {
+    #             "name": "BashTool",
+    #             "description": "Interact with a Linux terminal with bash",
+    #             "parameters": {
+    #                 "type": "object",
+    #                 "required": ["command"],
+    #                 "properties": {
+    #                     'command': {
+    #                         'type': 'text',
+    #                         'description': 'Any bash command.'
+    #                     }
+    #                 },
+    #             }
+    #         }
+    #     },
+    #     {
+    #         "type": "function",
+    #         "function": {
+    #             "name": "ClearContextTool",
     #             "description": MEM_TOOL_DESC,
     #             "parameters": {
     #                 "type": "object",
-    #                 "required": ["user_request", "what_i_did", "what_i_should_do_next"],
+    #                 "required": ["think", "next_session_context"],
     #                 "properties": {
-    #                     'user_request': {
+    #                     'next_session_context': {
     #                         'type': "text",
-    #                         'description': "Summary of the user request, should include as many details as possible."
+    #                         'description': (
+    #                             "A comprehensive, standalone summary of the state of the world. "
+    #                             "This string will be the ONLY memory available to you after the reset. "
+    #                             "Summary with this format:\n# What I Did\nWhat I Should Do Next, "
+    #                             "put all the important information that you think is necessary."
+    #                         )
     #                     },
-    #                     'what_i_did': {
-    #                         'type': "text",
-    #                         'description': "Summary of what you have done for completing the task."
-    #                     },
-    #                     'what_i_should_do_next':{
-    #                         'type': "text",
-    #                         'description': "Give brief instruction of what you should do after the context is replaced."
+    #                     "think": {
+    #                         "type": "text",
+    #                         "description": (
+    #                             "Write your reasoning trace here, think step by step, and list in detail with bullet points what specific information you should pass on to the next session."
+    #                         )
     #                     }
     #                 }
     #             }
     #         }
+    #     },
+    #     {
+    #         "type": "function",
+    #         "function": {
+    #             "name": "SubmitTool",
+    #             "description": "Call this tool when you think you have resolved the problem.",
+    #             "parameters": {}
+    #         }
     #     }
     # ]
+    
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "BashTool",
+                "description": "Interact with a Linux terminal with bash",
+                "parameters": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        'command': {
+                            'type': 'text',
+                            'description': 'Any bash command.'
+                        }
+                    },
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "SubmitTool",
+                "description": "Call this tool when you think you have resolved the problem.",
+                "parameters": {}
+            }
+        },
+        # {
+        #     "type": "function",
+        #     "function": {
+        #         "name": "ReadFileTool",
+        #         "description": "Reads content from a file. Can read the entire file or specific lines to handle large files. Always use line numbers for files likely to be large (e.g., logs, big source files).",
+        #         "parameters": {
+        #             "type": "object",
+        #             "required": ["file_path"],
+        #             "properties": {
+        #                 "file_path": {
+        #                 "type": "text",
+        #                 "description": "The path to the file to read."
+        #                 },
+        #                 "start_line": {
+        #                 "type": "integer",
+        #                 "description": "The line number to start reading from (1-indexed). Optional."
+        #                 },
+        #                 "end_line": {
+        #                 "type": "integer",
+        #                 "description": "The last line number to read. Optional. If omitted, reads to the end."
+        #                 }
+        #             }
+        #         }
+        #     }
+        # },
+        {
+            "type": "function",
+            "function": {
+                "name": "HandoffTool",
+                "description": MEM_TOOL_DESC,
+                "parameters": {
+                    "type": "object",
+                    "required": ["mission_anchor", "acquired_environmental_knowledge", "pruned_paths", "immediate_next_step", "others"],
+                    "properties": {
+                        'mission_anchor': {
+                            'type': "text",
+                            'description': (
+                                "CRYTICAL: Write the mission anchor as detail as possible!!!"
+                                "- **Original Goal:** (Verbatim, what was the user's initial request?)\n"
+                                "- **Current Status:** (e.g., 'Phase 1: Exploration Complete. Phase 2: Implementation In-progress.')\n"
+                                "- **Completion Plan:** (What remains to be done? Be concise.)\n"
+                            )
+                        },
+                        'acquired_environmental_knowledge':{
+                            'type': "text",
+                            'description': (
+                                "*List all high-cost information you have retrieved from the environment (tools/APIs/files). Save your successor the token cost of retrieving them again.*\n"
+                                "- **File/Data Context:** (e.g., file/respository structure)\n"
+                                "- **Key Variables:** (e.g., 'AWS Instance ID: i-12345', 'User ID: 888')\n"
+                                "- **Experiences:** (e.g., 'Where the bug is, what you have done to it')\n"
+                            )
+                        },
+                        'pruned_paths':{
+                            'type': "text",
+                            'description': (
+                                "*List what you have TRIED but FAILED. Prevent your successor from entering a retry loop.*\n"
+                                "- **Failed Attempts:** (e.g., 'Tried modifying `config.json` but it caused a syntax error.')\n"
+                                "- **Invalid Hypotheses:** (e.g., 'The bug is NOT in the database connection string; verified via logs.')"
+                            )
+                        },
+                        'immediate_next_step':{
+                            'type': "text",
+                            'description': (
+                                "**Atomic Action:** (The exact single step the successor must take immediately upon waking up. e.g., "
+                                "Write the unit test for `fix_login_bug` in `tests/test_auth.py`.)"
+                            )
+                        },
+                        'others':{
+                            'type': "text",
+                            'description': (
+                                "*List all other information you have that may be useful to your successor."
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    ]
     
     return tools

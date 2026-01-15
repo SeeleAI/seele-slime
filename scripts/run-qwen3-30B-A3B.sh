@@ -32,8 +32,8 @@ CKPT_ARGS=(
    --hf-checkpoint /root/agent_ckpt/Qwen3-Coder-30B-A3B-Instruct/
    #--hf-checkpoint /root/Qwen3-30B-A3B-FP8
    --ref-load /root/agent_ckpt/Qwen3_torch_dist
-   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_finer_reward/
-   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_finer_reward/
+   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_70turn_64bs_handover_scale/
+   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_70turn_64bs_handover_scale/
    --save-interval 50
 )
 
@@ -43,11 +43,11 @@ ROLLOUT_ARGS=(
    # --save-debug-rollout-data debug_rollout
    # --load-debug-rollout-data debug_rollout
    --train-complete-traj
-   --num-training-groups 4
+   --num-training-groups 32
    --filter-zero-advantage
-   --max-turns 50
+   --max-turns 70
    # --prompt-data /root/seele-agent/agent_gym_data.jsonl
-   --prompt-data /root/seele-agent/swe_gym_data_evaluted_12k_50turn.jsonl
+   --prompt-data /root/seele-agent/swe_gym_data_evaluted_8r_12k_50turn.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -55,11 +55,11 @@ ROLLOUT_ARGS=(
    --rm-type deepscaler
    --num-rollout 3000
    --rollout-batch-size 32  # this one is useless
-   --n-samples-per-prompt 8
+   --n-samples-per-prompt 16
    --rollout-max-response-len 12000
-   --rollout-temperature 0.8
+   --rollout-temperature 0.9
    --use-tis
-   --global-batch-size 32
+   --global-batch-size 512
    # --balance-data
 )
 
@@ -73,11 +73,14 @@ EVAL_ARGS=(
 
 PERF_ARGS=(
    --actor-num-gpus-per-node 6
+   # --tensor-model-parallel-size 4
    --tensor-model-parallel-size 2
    --sequence-parallel
    --pipeline-model-parallel-size 3
+   # --pipeline-model-parallel-size 1
    --context-parallel-size 1
    --expert-model-parallel-size 2
+   # --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
@@ -115,7 +118,7 @@ OPTIMIZER_ARGS=(
 WANDB_ARGS=(
    --use-wandb
    --wandb-project qwen3-30B-coder-agent
-   --wandb-group full-traj-swe-selected-12k-50turn-bias-fix-finer-reward
+   --wandb-group full-traj-swe-selected-12k-50turn-bias-fix-70turn_64bs_handover_scale
    --wandb-key ${WANDB_KEY}
 )
 

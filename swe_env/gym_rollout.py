@@ -115,7 +115,7 @@ def _create_error_result(original_sample: Sample, traj_id: str, pg_id: str, erro
         loss_mask=[0],
         response="",
         response_length=1,
-        reward=-1.0,
+        reward=0.0,
         advantage=advantage,
         status=original_sample.status,
         metadata={
@@ -514,34 +514,33 @@ async def generate(
         # 1. task success
         success_reward = 1.0 if status.trajectory_success else 0.0
         # 2. swap length
-        if len(collected_samples) > 1:
-            avg_compression_ratio = sum([info["compression_ratio"] for info in status.swap_out_infos]) / len(status.swap_out_infos)
-            # compression ratio is usually 8-9, let's design a Gaussian function that the mean is 3
-            target = 3.0
-            sigma = 3.0
-            ratio_reward = np.exp(-((avg_compression_ratio - target) ** 2) / (2 * sigma ** 2))
-            r_tool = 0.1 * ratio_reward - 0.1
-        else:
-            r_tool = 0.0
+        # if len(collected_samples) > 1:
+        #     avg_compression_ratio = sum([info["compression_ratio"] for info in status.swap_out_infos]) / len(status.swap_out_infos)
+        #     # compression ratio is usually 8-9, let's design a Gaussian function that the mean is 3
+        #     target = 3.0
+        #     sigma = 3.0
+        #     ratio_reward = np.exp(-((avg_compression_ratio - target) ** 2) / (2 * sigma ** 2))
+        #     r_tool = 0.1 * ratio_reward - 0.1
+        # else:
+        #     r_tool = 0.0
         # 3. Force the model to use less turns
-        progress = loop_state.turn / MAX_TURNS
-        alpha = 1
-        efficiency_reward = (1.0 - progress) ** alpha
+        # progress = loop_state.turn / MAX_TURNS
+        # alpha = 1
+        # efficiency_reward = (1.0 - progress) ** alpha
         
-        if success_reward == 1.0:
-            final_reward = 1.0 + r_tool + efficiency_reward
-        else:
-            final_reward = r_tool
-        print("="*100)
-        print(f"Traj {trajectory_id}, reward: {final_reward}, success: {success_reward}, r_tool: {r_tool}, efficiency: {efficiency_reward}")
-        print("="*100)
-        status.reward_dict = {
-            "success": success_reward,
-            "r_tool": r_tool,
-            "efficiency": efficiency_reward
-        }
+        # if success_reward == 1.0:
+        #     final_reward = 1.0 + efficiency_reward # final_reward = 1.0 + r_tool + efficiency_reward
+        # else:
+        #     final_reward = 0.0 # final_reward = r_tool
+        # print("="*100)
+        # print(f"Traj {trajectory_id}, reward: {final_reward}, success: {success_reward},  efficiency: {efficiency_reward}") # r_tool: {r_tool},
+        # print("="*100)
+        # status.reward_dict = {
+        #     "success": success_reward,
+        #     "efficiency": efficiency_reward
+        # } # "r_tool": r_tool,
         # Normalize reward across samples in trajectory
-        # final_reward = 1.0 if status.trajectory_success else 0.0
+        final_reward = 1.0 if status.trajectory_success else 0.0
         for s in collected_samples:
             s.reward = final_reward
             # The last output info is enough

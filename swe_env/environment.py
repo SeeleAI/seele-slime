@@ -9,28 +9,72 @@ import re
 import asyncio
 import base64
 import functools
+import shlex
 
-def swap_context(summarize: dict, messages: list[dict], user_request: str) -> list[dict]:
-    assert messages[0]['role'] == "system", f"Message[0] role {messages[0]['role']} is incorrect, should be system"
-    system_prompt = messages[0]
-    next_session = summarize["next_session_context"]
-    think = summarize["think"]
-    summary_content = (
+# def swap_context(summarize: dict, messages: list[dict], user_request: str) -> list[dict]:
+#     assert messages[0]['role'] == "system", f"Message[0] role {messages[0]['role']} is incorrect, should be system"
+#     system_prompt = messages[0]
+#     next_session = summarize["next_session_context"]
+#     think = summarize["think"]
+#     summary_content = (
+# f"""
+# # User Request
+# {user_request}
+
+# <Important> You just called ClearContextTool, check the message from Previous Context </Important>
+# # Previous Context
+# {next_session}
+# """
+#     )
+#     new_message = [
+#         system_prompt,
+#         {"role": "user", "content": f"You called ClearContextTool, the new context is\n{summary_content}"}
+#     ]
+    
+#     return new_message
+
+
+def swap_context(args, messages):
+    assert messages[1]['role'] == 'user'
+    assert messages[0]['role'] == 'system'
+    
+    mission_anchor = args.get("mission_anchor", "")
+    acquired_knowledge = args.get("acquired_environmental_knowledge", "")
+    pruned_paths = args.get("pruned_paths", "")
+    immediate = args.get("immediate_next_step", "")
+    others = args.get("others", "")
+    
+    form = (
 f"""
-# User Request
-{user_request}
+Handoff Form From The Last Agent:
 
-<Important> You just called ClearContextTool, check the message from Previous Context </Important>
-# Previous Context
-{next_session}
+## Mission Anchor
+{mission_anchor}
+
+## Acquired Environmental Knowledge
+{acquired_knowledge}
+
+## Pruned Paths
+{pruned_paths}
+
+## Others
+{others}
+
+## Immediate Next Step
+{immediate}
 """
     )
-    new_message = [
-        system_prompt,
-        {"role": "user", "content": f"You called ClearContextTool, the new context is\n{summary_content}"}
-    ]
     
-    return new_message
+    new_ctx = (
+        "You are going to continue the work from an Agent, the agent "
+        "gave you the following handoff form:\n"
+        f"{form}"
+    )
+    new_conversation = [
+        messages[0].copy(),
+        {"role": "user", "content": new_ctx}
+    ]
+    return new_conversation
 
 def generate_patch(container):
     print("Generating patch...")
@@ -157,13 +201,16 @@ class SWEEnv:
         """Internal helper to handle tool logic."""
         name = tool_call.get("name")
         args = tool_call.get("arguments", {})
-        
+        # print("*"*100)
+        # print(name, args)
+        # print("*"*100)
         try:
-            if name == "ClearContextTool":
+            if name == "HandoffTool":
                 print(f"Detected Swap Tool!!!")
                 # Assuming swap_context returns a NEW list of messages (compressed history)
                 # We do not append an observation here, we replace the history.
-                new_history = swap_context(args, self.history, self.user_prompt)
+                # new_history = swap_context(args, self.history, self.user_prompt)
+                new_history = swap_context(args, self.history)
                 return StepResult(
                     updated_message=new_history,
                     reward=0.0,
@@ -178,6 +225,38 @@ class SWEEnv:
                 # print(f"{self.run_id} executing command {command}")
                 observation = asyncio.run(execute_in_container(self.container, command))
                 formatted_obs = f"Tool Execution Result:\n{observation}"
+                self._append_user_message(formatted_obs)
+                
+            elif name == "ReadFileTool":
+                file_path = args.get("file_path")
+                start_line = args.get("start_line")
+                end_line = args.get("end_line")
+                safe_path = shlex.quote(file_path)
+                if start_line is not None or end_line is not None:
+                    # Default start to 1 if only end is provided
+                    s = start_line if start_line is not None else 1
+                    
+                    if end_line is not None:
+                        # Read from s to e: sed -n '10,20p' file
+                        command = f"sed -n '{s},{end_line}p' {safe_path}"
+                    else:
+                        # Read from s to the end: sed -n '10,$p' file
+                        command = f"sed -n '{s},$p' {safe_path}"
+                else:
+                    # Standard full read
+                    command = f"cat {safe_path}"
+
+                observation = asyncio.run(execute_in_container(self.container, command))
+                
+                if "No such file or directory" in observation:
+                    observation =  f"Error: The file '{file_path}' does not exist."
+                    
+                # Helpful metadata for the agent to know what they are looking at
+                if start_line or end_line:
+                    observation = f"--- Reading {file_path} (Lines {start_line if start_line else 1}-{end_line if end_line else 'EOF'}) ---\n{observation}"
+                    
+                formatted_obs = f"Tool Execution Result:\n{observation}"
+                # print(formatted_obs)
                 self._append_user_message(formatted_obs)
             
             elif name == "SubmitTool":
