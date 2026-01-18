@@ -55,7 +55,7 @@ ROLLOUT_ARGS=(
    --rm-type deepscaler
    --num-rollout 3000
    --rollout-batch-size 32  # this one is useless
-   --n-samples-per-prompt 8
+   --n-samples-per-prompt 16
    --rollout-max-response-len 12000
    --rollout-temperature 0.9
    --use-tis
@@ -72,15 +72,11 @@ EVAL_ARGS=(
 )
 
 PERF_ARGS=(
-   --actor-num-gpus-per-node 6
-   # --tensor-model-parallel-size 4
-   --tensor-model-parallel-size 2
+   --tensor-model-parallel-size 4
    --sequence-parallel
-   --pipeline-model-parallel-size 3
-   # --pipeline-model-parallel-size 1
+   --pipeline-model-parallel-size 1
    --context-parallel-size 1
-   --expert-model-parallel-size 2
-   # --expert-model-parallel-size 8
+   --expert-model-parallel-size 8
    --expert-tensor-parallel-size 1
 
    --recompute-granularity full
@@ -123,9 +119,8 @@ WANDB_ARGS=(
 )
 
 SGLANG_ARGS=(
-   --rollout-num-gpus 2
-   --rollout-num-gpus-per-engine 1
-   --sglang-mem-fraction-static 0.7
+   --rollout-num-gpus-per-engine 2
+   --sglang-mem-fraction-static 0.8
    --sglang-cuda-graph-bs 1 2 4 8 $(seq 16 8 256)
 )
 
@@ -158,6 +153,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    -- python3 train.py \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node 8 \
+   --colocate \
    ${MODEL_ARGS[@]} \
    ${CKPT_ARGS[@]} \
    ${ROLLOUT_ARGS[@]} \

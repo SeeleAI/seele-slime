@@ -329,9 +329,9 @@ class SWEEnv:
             # 5. Determine Success
             # Success requires status to be completed AND resolved to be True
             is_success = result.get("resolved", False)
-            print("*"*100)
-            print(f"{patch}\nSuccess {is_success}")
-            print("*"*100)
+            # print("*"*100)
+            # print(f"{patch}\nSuccess {is_success}")
+            # print("*"*100)
 
             return {"success": is_success, "completed": True}
         

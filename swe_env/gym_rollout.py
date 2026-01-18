@@ -87,6 +87,7 @@ class GenerateState(metaclass=SingletonMeta):
 
     def reset(self) -> None:
         self.remaining_batch_size = 0
+        self.valid_groups = 0
         self.pendings = set()
         self.aborted = False
 
@@ -495,9 +496,9 @@ async def generate(
             break
         
     env.close()
-    if collected_samples:
-        for _sample in collected_samples:
-            print(state.tokenizer.decode(_sample.tokens))
+    # if collected_samples:
+    #     for _sample in collected_samples:
+    #         print(state.tokenizer.decode(_sample.tokens))
     
     # --- Finalization ---
     if not collected_samples or not status.task_finished:
@@ -577,206 +578,451 @@ def compute_group_advantages(
     return raw_rewards
 
 
+class GroupResult:
+    def __init__(self, steps, metrics_delta, swap_infos):
+        self.steps = steps
+        self.metrics_delta = metrics_delta
+        self.swap_infos = swap_infos
+
+async def _process_single_group(
+    rollout_id: int, 
+    data_source: GymRolloutDataSource, 
+    args, 
+    state: GenerateState
+) -> GroupResult:
+    """
+    Worker function: Handles generation for ONE group.
+    """
+    # 1. Fetch Prompt
+    prompt_groups = data_source.get_samples(1)
+    if not prompt_groups:
+        return GroupResult([], {}, [])
+    
+    prompt_group = prompt_groups[0]
+    prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
+    
+    # 2. Launch Generation Tasks
+    tasks = []
+    for i, prompt_sample in enumerate(prompt_group):
+        trajectory_id = f"{prompt_group_id}_traj_{i}"
+        task = generate(
+            args,
+            prompt_sample,
+            trajectory_id=trajectory_id,
+            prompt_group_id=prompt_group_id,
+            sampling_params=state.sampling_params.copy()
+        )
+        tasks.append(task)
+    
+    results = await asyncio.gather(*tasks)
+
+    # 3. Extract Raw Data
+    trajectory_results = [raw.samples for raw in results]
+    
+    # Metrics collection helpers
+    memory_tool_times = [raw.memory_tool_times for raw in results]
+    success = [int(raw.trajectory_success) for raw in results]
+    swap_reward_list = [raw.reward_dict.get("r_tool", 0) for raw in results]
+    efficiency_reward_list = [raw.reward_dict.get("efficiency", 0) for raw in results]
+    swap_success = [int(raw.trajectory_success and (len(raw.samples) > 1)) for raw in results]
+    swap_out_infos_list = [raw.swap_out_infos for raw in results]
+    
+    # Flatten swap infos
+    group_swap_infos = []
+    for infos in swap_out_infos_list:
+        group_swap_infos.extend(infos)
+
+    # 4. Compute Advantages (GRPO Logic)
+    advs = compute_group_advantages(trajectory_results, args)
+    for samples, adv in zip(trajectory_results, advs):
+        num_trajs = len(samples)
+        for samp in samples:
+            samp.advantage = adv / num_trajs
+    
+    # 5. Add to Buffer (This triggers the dynamic filter!)
+    all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
+    
+    # Important: The buffer might DROP this group if variance is 0
+    if all_steps:
+        data_source.add_steps_to_buffer(all_steps)
+
+    # 6. Package Metrics
+    metrics_delta = {
+        "total_memory_tool_times": sum(memory_tool_times),
+        "success_times": sum(success),
+        "swap_success_times": sum(swap_success),
+        "number_of_samples": len(results),
+        "swap_reward": sum(swap_reward_list),
+        "efficiency_reward": sum(efficiency_reward_list),
+        "number_of_swap_rollouts": sum([int(len(raw.samples) > 1) for raw in results]),
+        "total_trajectory_count": len(results),
+        "steps_generated_count": len(all_steps),
+        "group_size": len(prompt_group)
+    }
+
+    return GroupResult(all_steps, metrics_delta, group_swap_infos)
+
+
 async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
     """
-    异步生成rollout数据，返回List[Sample]
+    Optimized async rollout with precise task accounting to prevent overshooting.
     """
     state = GenerateState(args)
-    target_size = args.global_batch_size
-    total_memory_tool_times = 0
-    success_times = 0
-    swap_success_times = 0
-    number_of_samples = 0
-    number_of_swap_rollouts = 0
-    swap_reward = 0
-    efficiency_reward = 0
     
-    # W&B Swap Out Metrics: 在 while 循环外部初始化
+    # Metrics Accumulators
+    acc_metrics = {
+        "total_memory_tool_times": 0, "success_times": 0, "swap_success_times": 0,
+        "number_of_samples": 0, "number_of_swap_rollouts": 0, "swap_reward": 0,
+        "efficiency_reward": 0, "total_trajectory_count": 0
+    }
     all_swap_infos: List[dict] = []
-    total_trajectory_count = 0  # 记录真实的 trajectory 数量
     
-    if args.train_complete_traj:
-        assert args.num_training_groups is not None, f"Should set args.num_training_groups when training with complete trajectories!"
-    def traj_level_target():
-        return data_source.get_step_buffer_length() < target_size
-    def group_level_target():
-        return data_source.get_step_buffer_num_groups() < args.num_training_groups
+    pending_tasks = set()
+
+    # --- Wrapper to manage semaphore ---
+    async def sem_task():
+        async with state.semaphore:
+            return await _process_single_group(rollout_id, data_source, args, state)
+
+    print(f"Starting rollout. Target: {args.num_training_groups} groups. Concurrency: {args.sglang_server_concurrency}")
     
-    condition_func = traj_level_target if not args.train_complete_traj else group_level_target
-    
-    while condition_func():
-        # get just one sample, but this sample is repeated for n_samples_per_prompt times
-        # for group generation. Note that, the original buffer in SLIME is useless.
-        prompt_groups = data_source.get_samples(1)
-        if not prompt_groups:
-            raise ValueError("No samples generated")
+    # --- Main Producer-Consumer Loop ---
+    while True:
+        # Check status
+        current_groups_in_buffer = data_source.get_step_buffer_num_groups()
+        groups_needed = args.num_training_groups - current_groups_in_buffer
         
-        prompt_group = prompt_groups[0]  # [Sample1, Sample2, ...] (n_samples_per_prompt个)
-        
-        # 为这个prompt group生成一个唯一ID
-        prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
-        
-        # Note that this loop submits only one group
-        # async inside the group, but sync between groups...
-        tasks = []
-        for i, prompt_sample in enumerate(prompt_group):
-            trajectory_id = f"{prompt_group_id}_traj_{i}"
+        # STOP CONDITION: We have enough in buffer AND no pending tasks
+        # (We must wait for pending tasks to finish to ensure we don't exit early 
+        # while some are still processing, although arguably we could exit if buffer is full)
+        if groups_needed <= 0 and not pending_tasks:
+            break
             
-            task = generate(
-                args,
-                prompt_sample,
-                trajectory_id=trajectory_id,
-                prompt_group_id=prompt_group_id,
-                sampling_params=state.sampling_params.copy()
-            )
-            tasks.append(task)
-        
-        # 等待所有trajectories完成
-        results = await asyncio.gather(*tasks)
-        trajectory_results = [raw.samples for raw in results]
-        memory_tool_times = [raw.memory_tool_times for raw in results]
-        success = [int(raw.trajectory_success) for raw in results]
-        swap_reward_list = [raw.reward_dict.get("r_tool", 0) for raw in results]
-        efficiency_reward_list = [raw.reward_dict.get("efficiency", 0) for raw in results]
-        swap_success = [int(raw.trajectory_success and (len(raw.samples) > 1)) for raw in results]
-        # W&B Swap Out Metrics: 收集 swap_out_infos
-        swap_out_infos_list = [raw.swap_out_infos for raw in results]
-        
-        total_memory_tool_times += sum(memory_tool_times)
-        success_times += sum(success)
-        swap_success_times += sum(swap_success)
-        number_of_samples += len(results)
-        swap_reward += sum(swap_reward_list)
-        efficiency_reward += sum(efficiency_reward_list)
-        number_of_swap_rollouts += sum([int(len(raw.samples) > 1) for raw in results])
-        total_trajectory_count += len(results)  # 同步累加，与 total_memory_tool_times 分母一致
-        
-        # W&B Swap Out Metrics: 累加而不是重置
-        for infos in swap_out_infos_list:
-            all_swap_infos.extend(infos)
-        # breakpoint()
-        # trajectory_results: List[List[Sample]], one group in GRPO
-        # The first List is N trajectories, the second List represents
-        # possible swap out
-        # Compute group advantage right here
-        advs = compute_group_advantages(trajectory_results, args)
-        for samples, adv in zip(trajectory_results, advs):
-            ####################################
-            # IMPORTANT! Experimental Feature! #
-            ####################################
-            # Lynx: Trying to fix the reward bias
-            num_trajs = len(samples)
-            for samp in samples:  # assign identical advantage to swap out samples
-                samp.advantage = adv / num_trajs
+        # 1. Fill the pipeline precisely
+        # We only spawn if:
+        #   A) We have concurrency slots open
+        #   B) (Pending + Current) < Target. This prevents the overshooting bug.
+        while len(pending_tasks) < (args.sglang_server_concurrency * args.rollout_num_gpus // args.rollout_num_gpus_per_engine):
+            # Re-calculate inside loop because pending_tasks grows
+            potential_total = current_groups_in_buffer + len(pending_tasks)
+            if potential_total >= args.num_training_groups:
+                break
                 
-            ####################################################
-            # Idea 1: Final answer should gain equal advantage #
-            # Verified: Not work                               #
-            ####################################################
-            # samples[-1].advantage = adv
+            task = asyncio.create_task(sem_task())
+            pending_tasks.add(task)
         
-        # flatten all trajectories
-        all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
+        # If we broke the inner loop because potential_total reached target, 
+        # but have 0 pending tasks (and target not met), it implies an error state or empty source
+        if not pending_tasks and groups_needed > 0:
+            raise ValueError("Warning: No pending tasks and target not reached (Source exhausted?)")
+
+        # 2. Wait for at least one task to finish
+        done, pending_tasks = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
         
-        # 将生成的steps放入buffer
-        if all_steps:
-            data_source.add_steps_to_buffer(all_steps)
+        # 3. Process results
+        for task in done:
+            try:
+                result = task.result()
+                
+                # Update Metrics
+                for k, v in result.metrics_delta.items():
+                    if k in acc_metrics.keys():
+                        acc_metrics[k] += v
+                all_swap_infos.extend(result.swap_infos)
+                
+                print(
+                    f"Generated {result.metrics_delta['steps_generated_count']} steps. | "
+                    f"Buffer Groups: {data_source.get_step_buffer_num_groups()}/{args.num_training_groups} | "
+                    f"Buffer Size: {data_source.get_step_buffer_length()}"
+                )
+                      
+            except Exception as e:
+                print(f"Error in rollout task: {e}")
+                import traceback
+                traceback.print_exc()
         
-        print(f"Generated {len(all_steps)} steps from {len(prompt_group)} trajectories, "
-              f"buffer size: {data_source.get_step_buffer_length()}")
+        # Loop continues... 
+        # If the task that just finished was DROPPED by buffer, 'current_groups_in_buffer' won't increase.
+        # 'pending_tasks' decreased by 1.
+        # So 'potential_total' decreases by 1, allowing the loop to spawn a replacement task.
+
+    # --- Post-Processing ---
+    final_samples = data_source.get_complete_traj(args.num_training_groups)
     
-    # 从buffer取出需要的数量
-    if not args.train_complete_traj:
-        final_samples = data_source.get_steps_from_buffer(target_size)
-    else:
-        final_samples = data_source.get_complete_traj(args.num_training_groups)
-        original_len = len(final_samples)
-        # Pad to multiplier of global batch size, is it safe?
-        remainder = len(final_samples) % args.global_batch_size
-        if not remainder == 0:
-            pad_len = args.global_batch_size - remainder
-            pad_sample = _create_error_result(
-                final_samples[0], 
-                final_samples[0].metadata["trajectory_id"], 
-                final_samples[0].metadata["prompt_group_id"],
-                "pad"
-            )
-            final_samples.extend(pad_sample * pad_len)
-            print(f"Original length {original_len}, padded to {len(final_samples)}")
-            
-    debug_sample = None
-    valid_samples = 0
-    for sample in final_samples:
-        if len(sample.messages) > 0:
-            # find the first valid sample
-            if not debug_sample:
-                debug_sample = sample
-            # else count valid samples (with real trajectories)
-            valid_samples += 1
-    print(f"Prompt: {debug_sample.prompt}")
-    print(f"Response: {debug_sample.response}")
-    success_rate = success_times / number_of_samples if number_of_samples > 0 else 0
-    swap_success_rate = swap_success_times / number_of_swap_rollouts if number_of_swap_rollouts > 0 else 0
-    true_reward = torch.tensor([samp.reward for samp in final_samples if not samp.metadata.get("error", "") == "pad"], dtype=torch.float).mean().item()
-    true_adv = torch.tensor([samp.advantage for samp in final_samples if not samp.metadata.get("error", "") == "pad"], dtype=torch.float).mean().item()
-    trajectory_ids = set()
-    prompt_group_ids = set()
+    # Padding logic (Redundant check removed, safe padding implementation)
+    original_len = len(final_samples)
+    remainder = len(final_samples) % args.global_batch_size
+    if remainder != 0:
+        pad_len = args.global_batch_size - remainder
+        pad_sample = _create_error_result(
+            final_samples[0], 
+            final_samples[0].metadata["trajectory_id"], 
+            final_samples[0].metadata["prompt_group_id"],
+            "pad"
+        )
+        final_samples.extend(pad_sample * pad_len)
+        print(f"Original length {original_len}, padded to {len(final_samples)}")
+
+    # Calculate Final Stats
+    debug_sample = next((s for s in final_samples if len(s.messages) > 0), None)
+    valid_samples = sum(1 for s in final_samples if len(s.messages) > 0)
+    
+    if debug_sample:
+        print(f"Prompt: {debug_sample.prompt}")
+        print(f"Response: {debug_sample.response}")
+
+    def safe_div(n, d): return n / d if d > 0 else 0
+
+    success_rate = safe_div(acc_metrics["success_times"], acc_metrics["number_of_samples"])
+    swap_success_rate = safe_div(acc_metrics["swap_success_times"], acc_metrics["number_of_swap_rollouts"])
+    
+    valid_for_stats = [s for s in final_samples if s.metadata.get("error", "") != "pad"]
+    true_reward = torch.tensor([s.reward for s in valid_for_stats], dtype=torch.float).mean().item() if valid_for_stats else 0.0
+    true_adv = torch.tensor([s.advantage for s in valid_for_stats], dtype=torch.float).mean().item() if valid_for_stats else 0.0
+    
+    trajectory_ids = {s.metadata["trajectory_id"] for s in final_samples}
+    prompt_group_ids = {s.metadata["prompt_group_id"] for s in final_samples}
     total_steps = len(final_samples)
-    for sample in final_samples:
-        trajectory_ids.add(sample.metadata["trajectory_id"])
-        prompt_group_ids.add(sample.metadata["prompt_group_id"])
-        
-    # W&B Swap Out Metrics: 计算 swap out 相关指标
-    swap_out_sample_count = sum(
-        1 for s in final_samples if s.metadata.get("context_modified", False)
-    )
+
+    swap_out_sample_count = sum(1 for s in final_samples if s.metadata.get("context_modified", False))
     
     avg_swap_content_length = 0.0
     avg_compression_ratio = 0.0
     avg_swap_turn_number = 0.0
+    
     if all_swap_infos:
-        avg_swap_content_length = sum(info["tokens_after"] for info in all_swap_infos) / len(all_swap_infos)
-        avg_compression_ratio = sum(info["compression_ratio"] for info in all_swap_infos) / len(all_swap_infos)
-        # 平均在第几个 turn 发生 swap
-        avg_swap_turn_number = sum(info["turn_number"] for info in all_swap_infos) / len(all_swap_infos)
-    
-    # 每条轨迹平均 swap 次数（使用 total_trajectory_count 确保分母一致）
-    swap_frequency_per_trajectory = (
-        total_memory_tool_times / total_trajectory_count if total_trajectory_count > 0 else 0
-    )
-    
-    # 随机采样一个完整轨迹用于质量监控
+        avg_swap_content_length = safe_div(sum(i["tokens_after"] for i in all_swap_infos), len(all_swap_infos))
+        avg_compression_ratio = safe_div(sum(i["compression_ratio"] for i in all_swap_infos), len(all_swap_infos))
+        avg_swap_turn_number = safe_div(sum(i["turn_number"] for i in all_swap_infos), len(all_swap_infos))
+
+    swap_frequency_per_trajectory = safe_div(acc_metrics["total_memory_tool_times"], acc_metrics["total_trajectory_count"])
     sampled_trajectory = _sample_random_trajectory(final_samples, state.tokenizer)
-    
+
     metrics = {
         "rollout/success_rate": success_rate,
         "rollout/swap_success_rate": swap_success_rate,
-        # we have swap reward only when we swap, then we should normalize by number of swap rollouts
-        "rollout/swap_reward": swap_reward / number_of_swap_rollouts if number_of_swap_rollouts > 0 else 0,
-        # we have efficiency reward only in success samples
-        "rollout/efficiency_reward": efficiency_reward / success_times if success_times > 0 else 0,
+        "rollout/swap_reward": safe_div(acc_metrics["swap_reward"], acc_metrics["number_of_swap_rollouts"]),
+        "rollout/efficiency_reward": safe_div(acc_metrics["efficiency_reward"], acc_metrics["success_times"]),
         "rollout/true_reward": true_reward,
         "rollout/true_advantage": true_adv,
-        "rollout/memory_tool_times": total_memory_tool_times,
+        "rollout/memory_tool_times": acc_metrics["total_memory_tool_times"],
         "rollout/num_trajectories": len(trajectory_ids),
         "rollout/num_prompt_groups": len(prompt_group_ids),
-        "rollout/avg_steps_per_trajectory": total_steps / len(trajectory_ids) if trajectory_ids else 0,
-        "rollout/valid_samples_ratio": valid_samples / total_steps,
-        # W&B Swap Out Metrics: 新增指标
-        "rollout/swap_out_sample_ratio": swap_out_sample_count / total_steps if total_steps > 0 else 0,
+        "rollout/avg_steps_per_trajectory": safe_div(total_steps, len(trajectory_ids)),
+        "rollout/valid_samples_ratio": safe_div(valid_samples, total_steps),
+        "rollout/swap_out_sample_ratio": safe_div(swap_out_sample_count, valid_samples),
         "rollout/avg_swap_content_length": avg_swap_content_length,
         "rollout/swap_compression_ratio": avg_compression_ratio,
         "rollout/swap_frequency_per_trajectory": swap_frequency_per_trajectory,
-        "rollout/avg_swap_turn_number": avg_swap_turn_number
+        "rollout/avg_swap_turn_number": avg_swap_turn_number,
+        "_swap_infos": all_swap_infos[:50],
+        "_sampled_trajectory": sampled_trajectory
     }
-    
-    # 内部字段，传递给 _log_rollout_data 处理 W&B Table（以 _ 开头表示内部使用）
-    metrics["_swap_infos"] = all_swap_infos[:50]  # 限制最多 50 条
-    metrics["_sampled_trajectory"] = sampled_trajectory
-    # assert all(samp.reward is not None for samp in final_samples)
-    # assert all(samp.advantage is not None for samp in final_samples)
-    
+
     return RolloutFnTrainOutput(samples=final_samples, metrics=metrics)
+
+
+
+# async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
+#     """
+#     异步生成rollout数据，返回List[Sample]
+#     """
+#     state = GenerateState(args)
+#     target_size = args.global_batch_size
+#     total_memory_tool_times = 0
+#     success_times = 0
+#     swap_success_times = 0
+#     number_of_samples = 0
+#     number_of_swap_rollouts = 0
+#     swap_reward = 0
+#     efficiency_reward = 0
+    
+#     # W&B Swap Out Metrics: 在 while 循环外部初始化
+#     all_swap_infos: List[dict] = []
+#     total_trajectory_count = 0  # 记录真实的 trajectory 数量
+    
+#     if args.train_complete_traj:
+#         assert args.num_training_groups is not None, f"Should set args.num_training_groups when training with complete trajectories!"
+#     def traj_level_target():
+#         return data_source.get_step_buffer_length() < target_size
+#     def group_level_target():
+#         return data_source.get_step_buffer_num_groups() < args.num_training_groups
+    
+#     condition_func = traj_level_target if not args.train_complete_traj else group_level_target
+    
+#     while condition_func():
+#         # get just one sample, but this sample is repeated for n_samples_per_prompt times
+#         # for group generation. Note that, the original buffer in SLIME is useless.
+#         prompt_groups = data_source.get_samples(1)
+#         if not prompt_groups:
+#             raise ValueError("No samples generated")
+        
+#         prompt_group = prompt_groups[0]  # [Sample1, Sample2, ...] (n_samples_per_prompt个)
+        
+#         # 为这个prompt group生成一个唯一ID
+#         prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
+        
+#         # Note that this loop submits only one group
+#         # async inside the group, but sync between groups...
+#         tasks = []
+#         for i, prompt_sample in enumerate(prompt_group):
+#             trajectory_id = f"{prompt_group_id}_traj_{i}"
+            
+#             task = generate(
+#                 args,
+#                 prompt_sample,
+#                 trajectory_id=trajectory_id,
+#                 prompt_group_id=prompt_group_id,
+#                 sampling_params=state.sampling_params.copy()
+#             )
+#             tasks.append(task)
+        
+#         # 等待所有trajectories完成
+#         results = await asyncio.gather(*tasks)
+#         trajectory_results = [raw.samples for raw in results]
+#         memory_tool_times = [raw.memory_tool_times for raw in results]
+#         success = [int(raw.trajectory_success) for raw in results]
+#         swap_reward_list = [raw.reward_dict.get("r_tool", 0) for raw in results]
+#         efficiency_reward_list = [raw.reward_dict.get("efficiency", 0) for raw in results]
+#         swap_success = [int(raw.trajectory_success and (len(raw.samples) > 1)) for raw in results]
+#         # W&B Swap Out Metrics: 收集 swap_out_infos
+#         swap_out_infos_list = [raw.swap_out_infos for raw in results]
+        
+#         total_memory_tool_times += sum(memory_tool_times)
+#         success_times += sum(success)
+#         swap_success_times += sum(swap_success)
+#         number_of_samples += len(results)
+#         swap_reward += sum(swap_reward_list)
+#         efficiency_reward += sum(efficiency_reward_list)
+#         number_of_swap_rollouts += sum([int(len(raw.samples) > 1) for raw in results])
+#         total_trajectory_count += len(results)  # 同步累加，与 total_memory_tool_times 分母一致
+        
+#         # W&B Swap Out Metrics: 累加而不是重置
+#         for infos in swap_out_infos_list:
+#             all_swap_infos.extend(infos)
+#         # breakpoint()
+#         # trajectory_results: List[List[Sample]], one group in GRPO
+#         # The first List is N trajectories, the second List represents
+#         # possible swap out
+#         # Compute group advantage right here
+#         advs = compute_group_advantages(trajectory_results, args)
+#         for samples, adv in zip(trajectory_results, advs):
+#             ####################################
+#             # IMPORTANT! Experimental Feature! #
+#             ####################################
+#             # Lynx: Trying to fix the reward bias
+#             num_trajs = len(samples)
+#             for samp in samples:  # assign identical advantage to swap out samples
+#                 samp.advantage = adv / num_trajs
+                
+#             ####################################################
+#             # Idea 1: Final answer should gain equal advantage #
+#             # Verified: Not work                               #
+#             ####################################################
+#             # samples[-1].advantage = adv
+        
+#         # flatten all trajectories
+#         all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
+        
+#         # 将生成的steps放入buffer
+#         if all_steps:
+#             data_source.add_steps_to_buffer(all_steps)
+        
+#         print(f"Generated {len(all_steps)} steps from {len(prompt_group)} trajectories, "
+#               f"buffer size: {data_source.get_step_buffer_length()}")
+    
+#     # 从buffer取出需要的数量
+#     if not args.train_complete_traj:
+#         final_samples = data_source.get_steps_from_buffer(target_size)
+#     else:
+#         final_samples = data_source.get_complete_traj(args.num_training_groups)
+#         original_len = len(final_samples)
+#         # Pad to multiplier of global batch size, is it safe?
+#         remainder = len(final_samples) % args.global_batch_size
+#         if not remainder == 0:
+#             pad_len = args.global_batch_size - remainder
+#             pad_sample = _create_error_result(
+#                 final_samples[0], 
+#                 final_samples[0].metadata["trajectory_id"], 
+#                 final_samples[0].metadata["prompt_group_id"],
+#                 "pad"
+#             )
+#             final_samples.extend(pad_sample * pad_len)
+#             print(f"Original length {original_len}, padded to {len(final_samples)}")
+            
+#     debug_sample = None
+#     valid_samples = 0
+#     for sample in final_samples:
+#         if len(sample.messages) > 0:
+#             # find the first valid sample
+#             if not debug_sample:
+#                 debug_sample = sample
+#             # else count valid samples (with real trajectories)
+#             valid_samples += 1
+#     print(f"Prompt: {debug_sample.prompt}")
+#     print(f"Response: {debug_sample.response}")
+#     success_rate = success_times / number_of_samples if number_of_samples > 0 else 0
+#     swap_success_rate = swap_success_times / number_of_swap_rollouts if number_of_swap_rollouts > 0 else 0
+#     true_reward = torch.tensor([samp.reward for samp in final_samples if not samp.metadata.get("error", "") == "pad"], dtype=torch.float).mean().item()
+#     true_adv = torch.tensor([samp.advantage for samp in final_samples if not samp.metadata.get("error", "") == "pad"], dtype=torch.float).mean().item()
+#     trajectory_ids = set()
+#     prompt_group_ids = set()
+#     total_steps = len(final_samples)
+#     for sample in final_samples:
+#         trajectory_ids.add(sample.metadata["trajectory_id"])
+#         prompt_group_ids.add(sample.metadata["prompt_group_id"])
+        
+#     # W&B Swap Out Metrics: 计算 swap out 相关指标
+#     swap_out_sample_count = sum(
+#         1 for s in final_samples if s.metadata.get("context_modified", False)
+#     )
+    
+#     avg_swap_content_length = 0.0
+#     avg_compression_ratio = 0.0
+#     avg_swap_turn_number = 0.0
+#     if all_swap_infos:
+#         avg_swap_content_length = sum(info["tokens_after"] for info in all_swap_infos) / len(all_swap_infos)
+#         avg_compression_ratio = sum(info["compression_ratio"] for info in all_swap_infos) / len(all_swap_infos)
+#         # 平均在第几个 turn 发生 swap
+#         avg_swap_turn_number = sum(info["turn_number"] for info in all_swap_infos) / len(all_swap_infos)
+    
+#     # 每条轨迹平均 swap 次数（使用 total_trajectory_count 确保分母一致）
+#     swap_frequency_per_trajectory = (
+#         total_memory_tool_times / total_trajectory_count if total_trajectory_count > 0 else 0
+#     )
+    
+#     # 随机采样一个完整轨迹用于质量监控
+#     sampled_trajectory = _sample_random_trajectory(final_samples, state.tokenizer)
+    
+#     metrics = {
+#         "rollout/success_rate": success_rate,
+#         "rollout/swap_success_rate": swap_success_rate,
+#         # we have swap reward only when we swap, then we should normalize by number of swap rollouts
+#         "rollout/swap_reward": swap_reward / number_of_swap_rollouts if number_of_swap_rollouts > 0 else 0,
+#         # we have efficiency reward only in success samples
+#         "rollout/efficiency_reward": efficiency_reward / success_times if success_times > 0 else 0,
+#         "rollout/true_reward": true_reward,
+#         "rollout/true_advantage": true_adv,
+#         "rollout/memory_tool_times": total_memory_tool_times,
+#         "rollout/num_trajectories": len(trajectory_ids),
+#         "rollout/num_prompt_groups": len(prompt_group_ids),
+#         "rollout/avg_steps_per_trajectory": total_steps / len(trajectory_ids) if trajectory_ids else 0,
+#         "rollout/valid_samples_ratio": valid_samples / total_steps,
+#         # W&B Swap Out Metrics: 新增指标
+#         "rollout/swap_out_sample_ratio": swap_out_sample_count / total_steps if total_steps > 0 else 0,
+#         "rollout/avg_swap_content_length": avg_swap_content_length,
+#         "rollout/swap_compression_ratio": avg_compression_ratio,
+#         "rollout/swap_frequency_per_trajectory": swap_frequency_per_trajectory,
+#         "rollout/avg_swap_turn_number": avg_swap_turn_number
+#     }
+    
+#     # 内部字段，传递给 _log_rollout_data 处理 W&B Table（以 _ 开头表示内部使用）
+#     metrics["_swap_infos"] = all_swap_infos[:50]  # 限制最多 50 条
+#     metrics["_sampled_trajectory"] = sampled_trajectory
+#     # assert all(samp.reward is not None for samp in final_samples)
+#     # assert all(samp.advantage is not None for samp in final_samples)
+    
+#     return RolloutFnTrainOutput(samples=final_samples, metrics=metrics)
 
 def _call_dynamic_filter(fn, *args, **kwargs):
     if fn is None:
