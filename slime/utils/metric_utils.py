@@ -1,17 +1,20 @@
+import logging
 import math
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
 
-def dict_add_prefix(d: Dict[str, Any], prefix: str) -> Dict[str, Any]:
+
+def dict_add_prefix(d: dict[str, Any], prefix: str) -> dict[str, Any]:
     return {f"{prefix}{k}": v for k, v in d.items()}
 
 
 def compute_pass_rate(
-    flat_rewards: List[float],
+    flat_rewards: list[float],
     group_size: int,
-    num_groups: Optional[int] = None,
+    num_groups: int | None = None,
 ):
     if group_size == 1:
         return {}
@@ -50,24 +53,26 @@ def _estimate_pass_at_k(num_samples, num_correct, k):
             return 1.0
         return 1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1))
 
-    return np.array([estimator(int(n), int(c), k) for n, c in zip(num_samples, num_correct)])
+    return np.array([estimator(int(n), int(c), k) for n, c in zip(num_samples, num_correct, strict=False)])
 
 
-def compute_statistics(values: List[float]) -> Dict[str, float]:
+def compute_statistics(values: list[float]) -> dict[str, float]:
     values = np.array(values)
     return {
         "mean": np.mean(values).item(),
         "median": np.median(values).item(),
+        "max": np.max(values).item(),
+        "min": np.min(values).item(),
     }
 
 
 def compression_ratio(
-    data: Union[str, bytes],
+    data: str | bytes,
     *,
     encoding: str = "utf-8",
     algorithm: Literal["zlib", "gzip", "bz2", "lzma"] = "zlib",
     level: int = 9,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     if isinstance(data, str):
         raw = data.encode(encoding)
     else:
@@ -105,7 +110,7 @@ def compression_ratio(
     return ratio, savings_pct
 
 
-def has_repetition(text: str = None):
+def has_repetition(text: str):
     if len(text) > 10000 and compression_ratio(text[-10000:])[0] > 10:
         return True
     else:
@@ -116,3 +121,28 @@ def compute_rollout_step(args, rollout_id):
     if args.wandb_always_use_train_step:
         return rollout_id * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
     return rollout_id
+
+
+class MetricChecker:
+    @staticmethod
+    def maybe_create(args):
+        if args.ci_test and (args.ci_metric_checker_key is not None):
+            return MetricChecker(args)
+        return None
+
+    def __init__(self, args):
+        self.args = args
+        self._exists_check_success = False
+
+    def on_eval(self, metrics: dict[str, float]):
+        actual_value = metrics.get(self.args.ci_metric_checker_key)
+        assert actual_value is not None, f"{metrics=} {self.args.ci_metric_checker_key=}"
+
+        check_success = actual_value >= self.args.ci_metric_checker_threshold
+        logger.info(f"[MetricChecker] {check_success=} {actual_value=} {self.args.ci_metric_checker_threshold=}")
+
+        self._exists_check_success |= check_success
+
+    def dispose(self):
+        assert self._exists_check_success, "[MetricChecker] accuracy check failed"
+        logger.info("[MetricChecker] pass dispose check")

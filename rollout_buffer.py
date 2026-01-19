@@ -1,6 +1,6 @@
 from typing import List
 from collections import defaultdict
-from slime.ray.rollout_data_source import RolloutDataSourceWithBuffer
+from slime.rollout.data_source import RolloutDataSourceWithBuffer
 from slime.utils.types import Sample
 
 

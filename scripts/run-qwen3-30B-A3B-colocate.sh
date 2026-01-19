@@ -45,9 +45,9 @@ ROLLOUT_ARGS=(
    --train-complete-traj
    --num-training-groups 32
    --filter-zero-advantage
-   --max-turns 70
+   --max-turns 100
    # --prompt-data /root/seele-agent/agent_gym_data.jsonl
-   --prompt-data /root/seele-agent/swe_gym_data_evaluted_8r_12k_50turn.jsonl
+   --prompt-data /root/seele-slime/swe_gym_data_evaluted_8r_12k_50turn.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template

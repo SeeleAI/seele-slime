@@ -5,8 +5,10 @@ from slime.utils.misc import SingletonMeta
 
 try:
     from torch.utils.tensorboard import SummaryWriter
-except:
+except ImportError:
     SummaryWriter = None
+
+__all__ = ["_TensorboardAdapter"]
 
 logger = logging.getLogger(__name__)
 

@@ -1,5 +1,3 @@
-import sglang
-from packaging.version import parse
 from sglang.srt.server_args import ServerArgs
 from slime.utils.http_utils import _wrap_ipv6
 
@@ -24,7 +22,7 @@ def add_sglang_router_arguments(parser):
     parser.add_argument(
         "--sglang-router-request-timeout-secs",
         type=int,
-        default=3600,
+        default=14400,
         help="Timeout for requests to the SGLang router in seconds",
     )
     return parser
@@ -41,7 +39,6 @@ def add_sglang_arguments(parser):
 
     skipped_args = [
         "model_path",
-        "dtype",
         "trust_remote_code",
         "random_seed",
         # memory
@@ -115,9 +112,6 @@ def add_sglang_arguments(parser):
 
 
 def validate_args(args):
-    if parse(sglang.__version__) == parse("0.4.10") and getattr(args, "sglang_enable_ep_moe", False):
-        args.sglang_expert_parallel_size = args.rollout_num_gpus_per_engine
-
     args.sglang_tp_size = args.rollout_num_gpus_per_engine
     args.sglang_dp_size = args.sglang_data_parallel_size
     args.sglang_pp_size = args.sglang_pipeline_parallel_size
