@@ -29,6 +29,8 @@ from dataclasses import dataclass, field
 from rollout_buffer import GymRolloutDataSource
 import uuid
 import functools
+from pathlib import Path
+
 
 __all__ = ["generate_rollout"]
 
@@ -45,6 +47,7 @@ class RolloutStatus:
     memory_tool_times: int = field(default=0)
     trajectory_success: bool = field(default=False)
     task_finished: bool = field(default=False)
+    misbehave: bool = field(default=False)
     # W&B Swap Out Metrics: 记录每次 swap 的详细信息
     swap_out_infos: List[dict] = field(default_factory=list)
     reward_dict: dict = field(default_factory=dict)
@@ -178,7 +181,7 @@ def _inject_token_budget(
         f"Remaining: {total_memory - input_token_len} </token_budget> **"
     )
     
-    return budget_msg
+    return budget_msg, total_memory - input_token_len
 
 def _create_reset_sample(previous_sample: Sample, new_messages: List[dict]) -> Sample:
     """Creates a fresh sample object for a modified context (swap out)."""
@@ -314,7 +317,7 @@ async def generate(
     # Fresh sample
     if not len(sample.response) > 0:
         init_message = system_messages
-        budget_msg = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, init_message, None, tool_set)
+        budget_msg, last_turn_budget = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, init_message, None, tool_set)
         init_message[-1]['content'] += budget_msg
         prompt_token_ids = state.tokenizer.apply_chat_template(
             init_message,
@@ -375,14 +378,17 @@ async def generate(
         sample.messages.append({"role": "assistant", "content": clean_response})
         logprobs = [item[0] for item in output["meta_info"]["output_token_logprobs"]]
         output_tokens = [item[1] for item in output["meta_info"]["output_token_logprobs"]]
-
+        
+        # Lynx: To allow turn-specific punishment, we add a backup here, before everything is updated
+        _backup_sample = copy.deepcopy(sample)
+        
         # Update Sample Stats (Logprobs, Loss Mask, Tokens)
         _update_sample_stats(sample, logprobs, output_tokens, state.tokenizer)
         
         # 3. Environment Interaction
         env_start = time.time()
         loop = asyncio.get_running_loop()
-        step_result = await loop.run_in_executor(None, env.step, sample.messages)
+        step_result = await loop.run_in_executor(None, env.step, sample.messages, last_turn_budget)
         env_duration = time.time() - env_start
         # Lynx: Do not punish unit test time!!!
         # if env_duration > FORCE_DROP_TIME:
@@ -393,6 +399,40 @@ async def generate(
         
         if step_result.reward is not None:
             loop_state.reward += step_result.reward
+            
+        if step_result.misbehave_swap:
+            # Implement punish logic here
+            # This is similar to a finished trajectory
+            # 1. we break here
+            # 2. a special 0 reward to give stronger punishment
+            # 3. on which tokens should we perform gradient update?
+            # case 1: 1 traj, 1 swap, then just punish this trajectory
+            # case 2: 2 traj(w 1 correct swap), then we should not punish the previous one maybe?
+            # No, let's consider gradient on the specific turn
+            # step 1: If we collected good swap samples, but model misbehaved in this session, we
+            # do not train the previous sample
+            print("*"*100)
+            print("Misbehaved swap detected!")
+            print("*"*100)
+            collected_samples.clear()
+            # step 2: set all previous loss masks to zero
+            _backup_sample.loss_mask = [0] * len(_backup_sample.loss_mask)
+            # step 3: add this turn and assign reward
+            _update_sample_stats(_backup_sample, logprobs, output_tokens, state.tokenizer)
+            _backup_sample.reward = 0
+            _backup_sample.status = Sample.Status.COMPLETED
+            _backup_sample.response_length = len(_backup_sample.tokens) - initial_prompt_len
+            _backup_sample.response = state.tokenizer.decode(_backup_sample.tokens[-_backup_sample.response_length:])
+            _backup_sample.metadata.update({
+                "trajectory_id": trajectory_id,
+                "prompt_group_id": prompt_group_id,
+                "turn_number": turn,
+                "env_config": _backup_sample.metadata.get("env_name"),
+            })
+            
+            collected_samples.append(_backup_sample)
+            status.misbehave = True
+            break
 
         # 4. Handle Step Result
         if step_result.done:
@@ -437,7 +477,7 @@ async def generate(
             # Reset Loop State with new context, step_result.updated_message includes only the swapped context
             sample = _create_reset_sample(sample, step_result.updated_message)
             # Inject budget token again
-            budget_msg = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, sample.messages, None, tool_set)
+            budget_msg, last_turn_budget = _inject_token_budget(sample, VIRTUAL_MEMORY, state.tokenizer, sample.messages, None, tool_set)
             sample.messages[-1]['content'] += budget_msg
             # Re-tokenize entire new context
             sample.tokens = state.tokenizer.apply_chat_template(
@@ -468,7 +508,7 @@ async def generate(
         # Lynx: Shallow copy to avoid in-place modification
         observation = step_result.updated_message[-1].copy()
         # Inject Token Budget
-        budget_msg = _inject_token_budget(
+        budget_msg, last_turn_budget = _inject_token_budget(
             sample, VIRTUAL_MEMORY, state.tokenizer,
             None, observation
         )
@@ -499,9 +539,34 @@ async def generate(
     # if collected_samples:
     #     for _sample in collected_samples:
     #         print(state.tokenizer.decode(_sample.tokens))
+    if collected_samples:
+        # 1. Construct the directory path: logs/prompt_group_id/
+        log_dir = Path("logs/trajectories") / prompt_group_id
+        
+        # 2. Create the directory if it doesn't exist (parents=True creates intermediate folders)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 3. Define the full file path
+        file_path = log_dir / f"{trajectory_id}.txt"
+
+        # 4. Open and write the content
+        with open(file_path, "w", encoding="utf-8") as f:
+            for i, _sample in enumerate(collected_samples):
+                # Decode the tokens
+                text = state.tokenizer.decode(_sample.tokens)
+                f.write(text)
+                
+                # Add the separator only if this is not the last sample
+                if i < len(collected_samples) - 1:
+                    f.write("\n\n========\n\n")
+            f.write(f"Success: {status.trajectory_success}")
     
     # --- Finalization ---
-    if not collected_samples or not status.task_finished:
+    if collected_samples and status.misbehave:
+        print(f"Misbehave sample collected")
+        assert len(collected_samples) == 1
+        assert collected_samples[0].reward == 0
+    elif not collected_samples or not status.task_finished:
         # If no trajectory generated or the task is not finished,
         # the collected_samples may contain unneccessary swap out samples
         # we do not intend to train them

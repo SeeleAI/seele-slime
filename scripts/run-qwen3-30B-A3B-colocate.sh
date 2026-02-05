@@ -32,9 +32,9 @@ CKPT_ARGS=(
    --hf-checkpoint /root/agent_ckpt/Qwen3-Coder-30B-A3B-Instruct/
    #--hf-checkpoint /root/Qwen3-30B-A3B-FP8
    --ref-load /root/agent_ckpt/Qwen3_torch_dist
-   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_70turn_64bs_handover_scale/
-   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_70turn_64bs_handover_scale/
-   --save-interval 50
+   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_100turn_64bs_handover_hit-bug-fix/
+   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_100turn_64bs_handover_hit-big-fix/
+   --save-interval 70
 )
 
 ROLLOUT_ARGS=(
@@ -45,7 +45,7 @@ ROLLOUT_ARGS=(
    --train-complete-traj
    --num-training-groups 32
    --filter-zero-advantage
-   --max-turns 100
+   --max-turns 100  # danger
    # --prompt-data /root/seele-agent/agent_gym_data.jsonl
    --prompt-data /root/seele-slime/swe_gym_data_evaluted_8r_12k_50turn.jsonl
    --input-key prompt
@@ -114,7 +114,7 @@ OPTIMIZER_ARGS=(
 WANDB_ARGS=(
    --use-wandb
    --wandb-project qwen3-30B-coder-agent
-   --wandb-group full-traj-swe-selected-12k-50turn-bias-fix-70turn_64bs_handover_scale
+   --wandb-group full-traj-swe-selected-12k-50turn-bias-fix-100turn_64bs_handover_hit_bug_fix
    --wandb-key ${WANDB_KEY}
 )
 

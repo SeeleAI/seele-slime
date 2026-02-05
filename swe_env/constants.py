@@ -18,6 +18,49 @@
 #     "and should be a last resort to prevent crashing."
 # )
 
+FEW_SHOTS = """
+## Useful command examples
+
+### Create a new file:
+
+```bash
+cat <<'EOF' > newfile.py
+import numpy as np
+hello = "world"
+print(hello)
+EOF
+```
+
+### Edit files with sed:
+
+```bash
+# Replace all occurrences
+sed -i 's/old_string/new_string/g' filename.py
+
+# Replace only first occurrence
+sed -i 's/old_string/new_string/' filename.py
+
+# Replace first occurrence on line 1
+sed -i '1s/old_string/new_string/' filename.py
+
+# Replace all occurrences in lines 1-10
+sed -i '1,10s/old_string/new_string/g' filename.py
+```
+
+### View file content:
+
+```bash
+# View specific lines with numbers
+nl -ba filename.py | sed -n '10,20p'
+```
+
+### Any other command you want to run
+
+```bash
+anything
+```
+"""
+
 SYS_PROMPT = (
     "You are a helpful assistant that can interact with a computer to solve tasks. "
     "The user will inform you of the remaining token budget. You must efficiently manage your limited token budget. \n\n"
@@ -31,6 +74,7 @@ SYS_PROMPT = (
     "remaining token budget is CRITICALLY LOW (e.g., less than 10% remaining). "
     "Do NOT use this tool to 'checkpoint' or 'save' your progress if you still have plenty of "
     "tokens available."
+    f"\n{FEW_SHOTS}"
 )
 
 # SYS_PROMPT = (
@@ -57,7 +101,7 @@ When executing multi-line Python code, the use of python3 -c is strictly prohibi
 
 If you find ModuleNotFoundError, try install with `pip install -e .` first. But usually I already installed all required dependencies.
 
-When you think you have resolved the problem, call the SubmitTool.
+When you think you have completed the task, call the SubmitTool.
 """
     )
     return prompt
@@ -185,7 +229,7 @@ def get_tool():
             "type": "function",
             "function": {
                 "name": "SubmitTool",
-                "description": "Call this tool when you think you have resolved the problem.",
+                "description": "When you think you have completed the task, you can use this tool to submit.",
                 "parameters": {}
             }
         },

@@ -67,6 +67,8 @@ def detect_potential_cheating(command: str) -> Tuple[bool, Optional[str]]:
         r"git\s+fetch",          # Fetching upstream objects
         r"git\s+pull",           # Pulling upstream changes
         r"git\s+archive",        # Exporting code
+        r"git\s+show",
+        r"git\s+log",
         r"git\s+checkout\s+[0-9a-f]{7,40}", # Checking out specific commit hashes (potential future state)
     ]
     
@@ -199,6 +201,10 @@ class StepResult:
     done: bool = field(default=False)
     success: bool = field(default=False)
     modified_context: bool = field(default=False)
+    ################################
+    # Add misbehave swap indicator #
+    ################################
+    misbehave_swap: bool = field(default=False)
     info: dict = field(default=None)
 
 class SWEEnv:
@@ -226,7 +232,7 @@ class SWEEnv:
         
         return {"message": message, "tools": tools}
 
-    def step(self, messages: List[Dict[str, str]]) -> StepResult:
+    def step(self, messages: List[Dict[str, str]], last_turn_budget: int) -> StepResult:
         """
         Executes a step in the environment based on the agent's message history.
         """
@@ -258,7 +264,7 @@ class SWEEnv:
         tool_call = parse_tool_call(model_output)
         
         if tool_call:
-            return self._handle_tool_execution(tool_call)
+            return self._handle_tool_execution(tool_call, last_turn_budget)
         
         # 4. Fallback: No command found
         observation = "No valid command or completion signal detected. Please check your format."
@@ -272,7 +278,7 @@ class SWEEnv:
             info={"reason": "no_command"}
         )
 
-    def _handle_tool_execution(self, tool_call: Dict[str, Any]) -> StepResult:
+    def _handle_tool_execution(self, tool_call: Dict[str, Any], last_turn_budget: int) -> StepResult:
         """Internal helper to handle tool logic."""
         name = tool_call.get("name")
         args = tool_call.get("arguments", {})
@@ -285,15 +291,31 @@ class SWEEnv:
                 # Assuming swap_context returns a NEW list of messages (compressed history)
                 # We do not append an observation here, we replace the history.
                 # new_history = swap_context(args, self.history, self.user_prompt)
-                new_history = swap_context(args, self.history)
-                return StepResult(
-                    updated_message=new_history,
-                    reward=0.0,
-                    done=False,
-                    success=False,
-                    modified_context=True,
-                    info={"reason": "memory_compressed"}
-                )
+                if int(last_turn_budget) > 3000:
+                    # observation = f"Handoff with enough token budget ({last_turn_budget}) is rejected!"
+                    # formatted_obs = f"Tool Execution Result:\n{observation}"
+                    # print("Swap rejected!")
+                    # Lynx: punish instead of reject
+                    return StepResult(
+                        updated_message=self.history,
+                        reward=0,
+                        done=False,
+                        success=False,
+                        modified_context=False,
+                        misbehave_swap=True,
+                        info={"reason": "Misbehaved swap"}
+                    )
+                    # self._append_user_message(formatted_obs)
+                else:
+                    new_history = swap_context(args, self.history)
+                    return StepResult(
+                        updated_message=new_history,
+                        reward=0.0,
+                        done=False,
+                        success=False,
+                        modified_context=True,
+                        info={"reason": "memory_compressed"}
+                    )
 
             elif name == "BashTool":
                 command = args.get("command")
