@@ -78,8 +78,15 @@ class RolloutDataSource(DataSource):
             )
             if self.args.rollout_shuffle:
                 self.dataset.shuffle(self.epoch_id)
+
+            # Dynamic dataset support: immutable full dataset for adjust_dataset to read,
+            # and for select_dataset to re-filter from.
+            self.full_samples: list[Sample] = list(self.dataset.origin_samples)
+            self._last_difficulty_mapping: dict[int, int] | None = None
         else:
             self.dataset = None
+            self.full_samples = []
+            self._last_difficulty_mapping = None
 
     def get_samples(self, num_samples):
         # TODO further improve code
@@ -111,6 +118,102 @@ class RolloutDataSource(DataSource):
             samples.append(group)
         return samples
 
+    def select_dataset(self, difficulty_mapping: dict[int, int],
+                       keep_min: int = 1, keep_max: int = 6) -> dict:
+        """
+        Filter the training dataset based on difficulty scores.
+
+        Retains only samples whose difficulty falls within [keep_min, keep_max].
+        Samples not present in difficulty_mapping are kept by default (unevaluated).
+
+        Args:
+            difficulty_mapping: Maps Sample.global_index to difficulty value
+                (integer 0-8, number of successful rollouts out of 8).
+            keep_min: Minimum difficulty to retain (inclusive). Default 1.
+            keep_max: Maximum difficulty to retain (inclusive). Default 6.
+
+        Returns:
+            A report dict with statistics about the adjustment.
+        """
+        if self.dataset is None:
+            logger.warning("select_dataset called but dataset is None. Skipping.")
+            return {"skipped": True}
+
+        self._last_difficulty_mapping = difficulty_mapping
+
+        total_full = len(self.full_samples)
+        total_before = len(self.dataset.origin_samples)
+        prev_ids = set(id(s) for s in self.dataset.origin_samples)
+
+        removed_easy = 0
+        removed_hard = 0
+        retained = 0
+        unevaluated = 0
+        restored = 0
+
+        new_origin = []
+        for sample in self.full_samples:
+            gidx = sample.global_index
+            if gidx not in difficulty_mapping:
+                new_origin.append(sample)
+                unevaluated += 1
+                continue
+
+            difficulty = difficulty_mapping[gidx]
+            if difficulty > keep_max:
+                removed_easy += 1
+            elif difficulty < keep_min:
+                removed_hard += 1
+            else:
+                new_origin.append(sample)
+                if id(sample) not in prev_ids:
+                    restored += 1
+                else:
+                    retained += 1
+
+        # Safety: if ALL samples would be removed, keep dataset unchanged
+        if len(new_origin) == 0:
+            logger.warning(
+                "select_dataset: filtering would remove ALL samples. "
+                "Keeping dataset unchanged."
+            )
+            return {
+                "total_full": total_full,
+                "total_before": total_before,
+                "total_after": total_before,
+                "removed_easy": 0,
+                "removed_hard": 0,
+                "retained": total_before,
+                "restored": 0,
+                "unevaluated": 0,
+                "warning": "all_removed_fallback",
+            }
+
+        # Update BOTH origin_samples and samples to avoid the shuffle trap:
+        # Dataset.shuffle() uses len(self.samples) for permutation but indexes
+        # into origin_samples, so both must have the same filtered content.
+        self.dataset.origin_samples = new_origin
+        self.dataset.samples = list(new_origin)
+        self.dataset.epoch_id = -1  # force next shuffle to execute
+
+        self.sample_offset = 0
+
+        if self.args.rollout_shuffle:
+            self.dataset.shuffle(self.epoch_id)
+
+        report = {
+            "total_full": total_full,
+            "total_before": total_before,
+            "total_after": len(self.dataset.origin_samples),
+            "removed_easy": removed_easy,
+            "removed_hard": removed_hard,
+            "retained": retained,
+            "restored": restored,
+            "unevaluated": unevaluated,
+        }
+        logger.info(f"select_dataset: {report}")
+        return report
+
     def add_samples(self, samples: list[list[Sample]]):
         raise RuntimeError(f"Cannot add samples to {self.__class__.__name__}. This is a read-only data source.")
 
@@ -124,6 +227,7 @@ class RolloutDataSource(DataSource):
             "sample_group_index": self.sample_group_index,
             "sample_index": self.sample_index,
             "metadata": self.metadata,
+            "last_difficulty_mapping": self._last_difficulty_mapping,
         }
         path = os.path.join(self.args.save, f"rollout/global_dataset_state_dict_{rollout_id}.pt")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -150,7 +254,13 @@ class RolloutDataSource(DataSource):
         self.sample_index = state_dict.get("sample_index", 0)
         self.metadata = state_dict.get("metadata", {})
 
-        if self.args.rollout_global_dataset and self.args.rollout_shuffle:
+        # Restore dynamic dataset state by replaying the last filtering operation.
+        self._last_difficulty_mapping = state_dict.get("last_difficulty_mapping", None)
+        if self._last_difficulty_mapping is not None:
+            self.select_dataset(self._last_difficulty_mapping)
+            # select_dataset resets sample_offset to 0; restore the exact checkpoint offset.
+            self.sample_offset = state_dict.get("sample_offset", 0)
+        elif self.args.rollout_global_dataset and self.args.rollout_shuffle:
             self.dataset.shuffle(self.epoch_id)
 
 

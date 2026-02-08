@@ -234,6 +234,10 @@ class Dataset:
         else:
             self.origin_samples = origin_samples
 
+        # Assign stable global_index after length filtering
+        for idx, sample in enumerate(self.origin_samples):
+            sample.global_index = idx
+
         self.epoch_id = -1
         self.seed = seed
         self.samples = self.origin_samples
