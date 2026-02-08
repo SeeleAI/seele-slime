@@ -9,6 +9,7 @@ import torch
 class Sample:
     """The sample generated"""
 
+    global_index: int | None = None  # stable index assigned at data loading, invariant across rollouts
     group_index: int | None = None
     index: int | None = None
     # prompt
