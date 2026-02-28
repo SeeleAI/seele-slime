@@ -124,6 +124,40 @@ def get_tool():
         "5. If you write vague summaries like 'I analyzed the code,' **you fail**.\n"
         "Generate a strict **[HANDOFF REPORT]** containing specific, actionable data. You must transfer **Knowledge**, not just a Summary."
     )
+    SUBMIT_TOOL_DESC = (
+"""
+## Submission Rule
+
+When you've completed the task, you can call this tool submit. Before you call this tool, follow these steps to check your changes.
+
+Step 1: Create the patch file
+Run `git diff > patch.txt` to inspect all files that have changed. Do NOT commit your changes. 
+
+<IMPORTANT>
+Do not submit file creations or changes to any of the following files:
+
+- test and reproduction files
+- helper scripts, tests, or tools that you created
+- installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)
+- binary or compiled files
+</IMPORTANT>
+
+Step 2: Verify your patch
+Inspect patch.txt to confirm it only contains changes that relate to the problem.
+
+Step 3: Submit
+Submit the **relavent** files you modified.
+Example:
+[
+    "path_to_file1",
+    "path_to_file2",
+]
+
+<CRITICAL>
+You CANNOT continue working (reading, editing, testing) in any way on this task after submitting.
+</CRITICAL>
+"""
+    )
     # tools = [
     #     {
     #         "type": "function",
@@ -229,8 +263,17 @@ def get_tool():
             "type": "function",
             "function": {
                 "name": "SubmitTool",
-                "description": "When you think you have completed the task, you can use this tool to submit.",
-                "parameters": {}
+                "description": SUBMIT_TOOL_DESC,
+                "parameters": {
+                    "type": "object",
+                    "required": ["files"],
+                    "properties": {
+                        'files': {
+                            'type': 'list[str]',
+                            'description': 'List of absolute file path'
+                        }
+                    },
+                }
             }
         },
         # {

@@ -183,6 +183,7 @@ class Dataset:
         apply_chat_template_kwargs=None,
     ):
         origin_samples = []
+        global_index = 0
         for data in read_file(path):
             # Both chat templates and multimodal inputs require conversation format (list of message dicts)
             as_conversation = apply_chat_template or (multimodal_keys is not None)
@@ -226,13 +227,19 @@ class Dataset:
                     label=data[label_key] if label_key is not None else None,
                     metadata=metadata,
                     multimodal_inputs=multimodal_inputs,
+                    global_index=global_index
                 )
             )
+            global_index += 1
 
         if max_length is not None:
             self.origin_samples = filter_long_prompt(origin_samples, tokenizer, processor, max_length)
         else:
             self.origin_samples = origin_samples
+            
+        # Assign stable global_index after length filtering
+        for idx, sample in enumerate(self.origin_samples):
+            sample.global_index = idx
 
         self.epoch_id = -1
         self.seed = seed

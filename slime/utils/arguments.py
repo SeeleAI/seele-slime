@@ -509,6 +509,23 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "If both `--num-epoch` and `--num-rollout` are set, `--num-epoch` will be ignored."
                 ),
             )
+            parser.add_argument(
+                "--dynamic-dataset-concurrency",
+                type=int,
+                default=128,
+                help=("Max concurrency when evaluating the whole training set")
+            )
+            parser.add_argument(
+                "--dynamic-dataset-n",
+                type=int,
+                default=8,
+                help=("Number of rollouts for dataset evaluation")
+            )
+            parser.add_argument(
+                "--dynamic-datarollout-path",
+                type=str,
+                default="swe_env.gym_rollout.dynamic_dataset_rollout"
+            )
 
             parser.add_argument(
                 "--disable-rollout-global-dataset",
@@ -645,7 +662,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
             )
             return parser
 
-        def add_eval_arguments(parser):
+        def add_eval_arguments(parser):          
             parser.add_argument(
                 "--eval-function-path",
                 type=str,
@@ -1557,9 +1574,10 @@ def slime_validate_args(args):
             if args.ref_ckpt_step is not None:
                 args.ckpt_step = args.ref_ckpt_step
             args.start_rollout_id = 0
-
-    if args.eval_interval is not None:
-        assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
+            
+    # Lynx: Coupled with dynamic dataset
+    # if args.eval_interval is not None:
+    #     assert args.eval_datasets, "Evaluation datasets must be configured when eval_interval is set."
 
     if args.save_interval is not None:
         assert args.save is not None, "'--save' is required when save_interval is set."

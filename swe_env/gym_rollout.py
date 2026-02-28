@@ -4,7 +4,7 @@ import logging
 import torch
 from argparse import Namespace
 from collections import defaultdict
-from typing import Any, Callable, Optional, Union, List
+from typing import Any, Callable, Optional, Union, List, Dict, Generator
 
 import numpy as np
 import sglang_router
@@ -44,6 +44,7 @@ DUMMY_EOS_TOKENS = ["<|endoftext|>"]
 @dataclass
 class RolloutStatus:
     samples: List[Sample] = field(default_factory=list)  # List of Sample, for possible swap out
+    global_index: int = field(default=None)
     memory_tool_times: int = field(default=0)
     trajectory_success: bool = field(default=False)
     task_finished: bool = field(default=False)
@@ -268,7 +269,9 @@ async def generate(
     sample: Sample, 
     sampling_params: dict[str, Any],
     prompt_group_id: str,
-    trajectory_id: str
+    trajectory_id: str,
+    log_results: bool = True,
+    enable_break_grpo: bool = True,
 ) -> RolloutStatus:
     """Generate using traditional SGLang router with token-based workflow"""
     state = GenerateState(args)
@@ -351,6 +354,7 @@ async def generate(
     ###################
     status = RolloutStatus()
     collected_samples: List[Sample] = []
+    status.global_index = sample.global_index
     for turn in range(MAX_TURNS):
         loop_state.turn = turn
         
@@ -400,7 +404,7 @@ async def generate(
         if step_result.reward is not None:
             loop_state.reward += step_result.reward
             
-        if step_result.misbehave_swap:
+        if step_result.misbehave_swap and enable_break_grpo:
             # Implement punish logic here
             # This is similar to a finished trajectory
             # 1. we break here
@@ -414,7 +418,7 @@ async def generate(
             print("*"*100)
             print("Misbehaved swap detected!")
             print("*"*100)
-            collected_samples.clear()
+            collected_samples.clear()  # [0, 1, 2]
             # step 2: set all previous loss masks to zero
             _backup_sample.loss_mask = [0] * len(_backup_sample.loss_mask)
             # step 3: add this turn and assign reward
@@ -539,7 +543,7 @@ async def generate(
     # if collected_samples:
     #     for _sample in collected_samples:
     #         print(state.tokenizer.decode(_sample.tokens))
-    if collected_samples:
+    if collected_samples and log_results:
         # 1. Construct the directory path: logs/prompt_group_id/
         log_dir = Path("logs/trajectories") / prompt_group_id
         
@@ -562,7 +566,7 @@ async def generate(
             f.write(f"Success: {status.trajectory_success}")
     
     # --- Finalization ---
-    if collected_samples and status.misbehave:
+    if collected_samples and status.misbehave and enable_break_grpo:
         print(f"Misbehave sample collected")
         assert len(collected_samples) == 1
         assert collected_samples[0].reward == 0
@@ -887,208 +891,6 @@ async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutD
     return RolloutFnTrainOutput(samples=final_samples, metrics=metrics)
 
 
-
-# async def generate_rollout_async(args, rollout_id: int, data_source: GymRolloutDataSource) -> List[Sample]:
-#     """
-#     异步生成rollout数据，返回List[Sample]
-#     """
-#     state = GenerateState(args)
-#     target_size = args.global_batch_size
-#     total_memory_tool_times = 0
-#     success_times = 0
-#     swap_success_times = 0
-#     number_of_samples = 0
-#     number_of_swap_rollouts = 0
-#     swap_reward = 0
-#     efficiency_reward = 0
-    
-#     # W&B Swap Out Metrics: 在 while 循环外部初始化
-#     all_swap_infos: List[dict] = []
-#     total_trajectory_count = 0  # 记录真实的 trajectory 数量
-    
-#     if args.train_complete_traj:
-#         assert args.num_training_groups is not None, f"Should set args.num_training_groups when training with complete trajectories!"
-#     def traj_level_target():
-#         return data_source.get_step_buffer_length() < target_size
-#     def group_level_target():
-#         return data_source.get_step_buffer_num_groups() < args.num_training_groups
-    
-#     condition_func = traj_level_target if not args.train_complete_traj else group_level_target
-    
-#     while condition_func():
-#         # get just one sample, but this sample is repeated for n_samples_per_prompt times
-#         # for group generation. Note that, the original buffer in SLIME is useless.
-#         prompt_groups = data_source.get_samples(1)
-#         if not prompt_groups:
-#             raise ValueError("No samples generated")
-        
-#         prompt_group = prompt_groups[0]  # [Sample1, Sample2, ...] (n_samples_per_prompt个)
-        
-#         # 为这个prompt group生成一个唯一ID
-#         prompt_group_id = f"group_{rollout_id}_{uuid.uuid4().hex[:8]}"
-        
-#         # Note that this loop submits only one group
-#         # async inside the group, but sync between groups...
-#         tasks = []
-#         for i, prompt_sample in enumerate(prompt_group):
-#             trajectory_id = f"{prompt_group_id}_traj_{i}"
-            
-#             task = generate(
-#                 args,
-#                 prompt_sample,
-#                 trajectory_id=trajectory_id,
-#                 prompt_group_id=prompt_group_id,
-#                 sampling_params=state.sampling_params.copy()
-#             )
-#             tasks.append(task)
-        
-#         # 等待所有trajectories完成
-#         results = await asyncio.gather(*tasks)
-#         trajectory_results = [raw.samples for raw in results]
-#         memory_tool_times = [raw.memory_tool_times for raw in results]
-#         success = [int(raw.trajectory_success) for raw in results]
-#         swap_reward_list = [raw.reward_dict.get("r_tool", 0) for raw in results]
-#         efficiency_reward_list = [raw.reward_dict.get("efficiency", 0) for raw in results]
-#         swap_success = [int(raw.trajectory_success and (len(raw.samples) > 1)) for raw in results]
-#         # W&B Swap Out Metrics: 收集 swap_out_infos
-#         swap_out_infos_list = [raw.swap_out_infos for raw in results]
-        
-#         total_memory_tool_times += sum(memory_tool_times)
-#         success_times += sum(success)
-#         swap_success_times += sum(swap_success)
-#         number_of_samples += len(results)
-#         swap_reward += sum(swap_reward_list)
-#         efficiency_reward += sum(efficiency_reward_list)
-#         number_of_swap_rollouts += sum([int(len(raw.samples) > 1) for raw in results])
-#         total_trajectory_count += len(results)  # 同步累加，与 total_memory_tool_times 分母一致
-        
-#         # W&B Swap Out Metrics: 累加而不是重置
-#         for infos in swap_out_infos_list:
-#             all_swap_infos.extend(infos)
-#         # breakpoint()
-#         # trajectory_results: List[List[Sample]], one group in GRPO
-#         # The first List is N trajectories, the second List represents
-#         # possible swap out
-#         # Compute group advantage right here
-#         advs = compute_group_advantages(trajectory_results, args)
-#         for samples, adv in zip(trajectory_results, advs):
-#             ####################################
-#             # IMPORTANT! Experimental Feature! #
-#             ####################################
-#             # Lynx: Trying to fix the reward bias
-#             num_trajs = len(samples)
-#             for samp in samples:  # assign identical advantage to swap out samples
-#                 samp.advantage = adv / num_trajs
-                
-#             ####################################################
-#             # Idea 1: Final answer should gain equal advantage #
-#             # Verified: Not work                               #
-#             ####################################################
-#             # samples[-1].advantage = adv
-        
-#         # flatten all trajectories
-#         all_steps = [step for trajectory_steps in trajectory_results for step in trajectory_steps]
-        
-#         # 将生成的steps放入buffer
-#         if all_steps:
-#             data_source.add_steps_to_buffer(all_steps)
-        
-#         print(f"Generated {len(all_steps)} steps from {len(prompt_group)} trajectories, "
-#               f"buffer size: {data_source.get_step_buffer_length()}")
-    
-#     # 从buffer取出需要的数量
-#     if not args.train_complete_traj:
-#         final_samples = data_source.get_steps_from_buffer(target_size)
-#     else:
-#         final_samples = data_source.get_complete_traj(args.num_training_groups)
-#         original_len = len(final_samples)
-#         # Pad to multiplier of global batch size, is it safe?
-#         remainder = len(final_samples) % args.global_batch_size
-#         if not remainder == 0:
-#             pad_len = args.global_batch_size - remainder
-#             pad_sample = _create_error_result(
-#                 final_samples[0], 
-#                 final_samples[0].metadata["trajectory_id"], 
-#                 final_samples[0].metadata["prompt_group_id"],
-#                 "pad"
-#             )
-#             final_samples.extend(pad_sample * pad_len)
-#             print(f"Original length {original_len}, padded to {len(final_samples)}")
-            
-#     debug_sample = None
-#     valid_samples = 0
-#     for sample in final_samples:
-#         if len(sample.messages) > 0:
-#             # find the first valid sample
-#             if not debug_sample:
-#                 debug_sample = sample
-#             # else count valid samples (with real trajectories)
-#             valid_samples += 1
-#     print(f"Prompt: {debug_sample.prompt}")
-#     print(f"Response: {debug_sample.response}")
-#     success_rate = success_times / number_of_samples if number_of_samples > 0 else 0
-#     swap_success_rate = swap_success_times / number_of_swap_rollouts if number_of_swap_rollouts > 0 else 0
-#     true_reward = torch.tensor([samp.reward for samp in final_samples if not samp.metadata.get("error", "") == "pad"], dtype=torch.float).mean().item()
-#     true_adv = torch.tensor([samp.advantage for samp in final_samples if not samp.metadata.get("error", "") == "pad"], dtype=torch.float).mean().item()
-#     trajectory_ids = set()
-#     prompt_group_ids = set()
-#     total_steps = len(final_samples)
-#     for sample in final_samples:
-#         trajectory_ids.add(sample.metadata["trajectory_id"])
-#         prompt_group_ids.add(sample.metadata["prompt_group_id"])
-        
-#     # W&B Swap Out Metrics: 计算 swap out 相关指标
-#     swap_out_sample_count = sum(
-#         1 for s in final_samples if s.metadata.get("context_modified", False)
-#     )
-    
-#     avg_swap_content_length = 0.0
-#     avg_compression_ratio = 0.0
-#     avg_swap_turn_number = 0.0
-#     if all_swap_infos:
-#         avg_swap_content_length = sum(info["tokens_after"] for info in all_swap_infos) / len(all_swap_infos)
-#         avg_compression_ratio = sum(info["compression_ratio"] for info in all_swap_infos) / len(all_swap_infos)
-#         # 平均在第几个 turn 发生 swap
-#         avg_swap_turn_number = sum(info["turn_number"] for info in all_swap_infos) / len(all_swap_infos)
-    
-#     # 每条轨迹平均 swap 次数（使用 total_trajectory_count 确保分母一致）
-#     swap_frequency_per_trajectory = (
-#         total_memory_tool_times / total_trajectory_count if total_trajectory_count > 0 else 0
-#     )
-    
-#     # 随机采样一个完整轨迹用于质量监控
-#     sampled_trajectory = _sample_random_trajectory(final_samples, state.tokenizer)
-    
-#     metrics = {
-#         "rollout/success_rate": success_rate,
-#         "rollout/swap_success_rate": swap_success_rate,
-#         # we have swap reward only when we swap, then we should normalize by number of swap rollouts
-#         "rollout/swap_reward": swap_reward / number_of_swap_rollouts if number_of_swap_rollouts > 0 else 0,
-#         # we have efficiency reward only in success samples
-#         "rollout/efficiency_reward": efficiency_reward / success_times if success_times > 0 else 0,
-#         "rollout/true_reward": true_reward,
-#         "rollout/true_advantage": true_adv,
-#         "rollout/memory_tool_times": total_memory_tool_times,
-#         "rollout/num_trajectories": len(trajectory_ids),
-#         "rollout/num_prompt_groups": len(prompt_group_ids),
-#         "rollout/avg_steps_per_trajectory": total_steps / len(trajectory_ids) if trajectory_ids else 0,
-#         "rollout/valid_samples_ratio": valid_samples / total_steps,
-#         # W&B Swap Out Metrics: 新增指标
-#         "rollout/swap_out_sample_ratio": swap_out_sample_count / total_steps if total_steps > 0 else 0,
-#         "rollout/avg_swap_content_length": avg_swap_content_length,
-#         "rollout/swap_compression_ratio": avg_compression_ratio,
-#         "rollout/swap_frequency_per_trajectory": swap_frequency_per_trajectory,
-#         "rollout/avg_swap_turn_number": avg_swap_turn_number
-#     }
-    
-#     # 内部字段，传递给 _log_rollout_data 处理 W&B Table（以 _ 开头表示内部使用）
-#     metrics["_swap_infos"] = all_swap_infos[:50]  # 限制最多 50 条
-#     metrics["_sampled_trajectory"] = sampled_trajectory
-#     # assert all(samp.reward is not None for samp in final_samples)
-#     # assert all(samp.advantage is not None for samp in final_samples)
-    
-#     return RolloutFnTrainOutput(samples=final_samples, metrics=metrics)
-
 def _call_dynamic_filter(fn, *args, **kwargs):
     if fn is None:
         return DynamicFilterOutput(keep=True)
@@ -1137,3 +939,105 @@ def generate_rollout(
     
     # 训练模式：生成steps
     return run(generate_rollout_async(args, rollout_id, data_source))
+
+
+def sample_generator(data_source: list, repeat: int) -> Generator[Any, None, None]:
+    """
+    Yields deep-copied samples repeatedly.
+    """
+    for global_idx, raw_sample in enumerate(data_source):
+        for _ in range(repeat):
+            yield copy.deepcopy(raw_sample)
+
+async def dynamic_dataset_rollout(
+    args: Namespace, 
+    rollout_id: int, 
+    data_source: Any
+) -> Dict[str, int]:
+    """
+    Evaluates the dataset with controlled concurrency using a local semaphore.
+    """
+    print(f"Starting evaluation on entire dataset (Concurrecny: {args.dynamic_dataset_concurrency})")
+    
+    # 1. Setup Local Concurrency Control
+    sem = asyncio.Semaphore(args.dynamic_dataset_concurrency)
+    
+    # Initialize state (assuming this is needed for sampling_params)
+    state = GenerateState(args)
+    passtimes_map: Dict[int, int] = {}
+    
+    async def bounded_generate(sample, prompt_group_id, trajectory_id):
+        """
+        Wrapper to acquire semaphore before generating.
+        """
+        async with sem:
+            # We copy sampling_params here just like the original code
+            return await generate(
+                args, 
+                sample, 
+                state.sampling_params.copy(), 
+                prompt_group_id, 
+                trajectory_id, 
+                log_results=False,
+                enable_break_grpo=False
+            )
+
+    # 2. Task Creation
+    tasks = []
+    
+    # Use the generator function
+    gen = sample_generator(data_source.full_samples, repeat=args.dynamic_dataset_n)
+    
+    for i, sample in enumerate(gen):
+        # Generate unique IDs, these are useful to avoid docker container conflict
+        prompt_group_id = f"group_{uuid.uuid4().hex[:8]}"
+        trajectory_id = f"{prompt_group_id}_traj_{i}"
+        
+        # Create the coroutine
+        tasks.append(
+            bounded_generate(sample, prompt_group_id, trajectory_id)
+        )
+
+    total_tasks = len(tasks)
+    print(f"Scheduled {total_tasks} trajectories.")
+
+    # 3. Execution & Result Processing
+    # as_completed yields futures as they finish, regardless of submission order.
+    # This keeps the loop responsive.
+    for future in asyncio.as_completed(tasks):
+        result = await future
+        
+        # Robust extraction of global index
+        if not result.samples:
+            raise RuntimeError("No sample collected, check arguments!")
+
+        global_idx = result.global_index
+        
+        # Initialize map entry if needed
+        if global_idx not in passtimes_map:
+            passtimes_map[global_idx] = 0
+
+        # Update success count
+        if result.trajectory_success:
+            passtimes_map[global_idx] += 1
+        
+        print(
+            f"Sample {global_idx} | Success: {result.trajectory_success} | "
+            f"Current Pass: {passtimes_map[global_idx]}"
+        )
+
+    print("Evaluation dataset rollout complete.")
+    
+    solvable_with_n = sum([1 for raw in passtimes_map.values() if raw > 0])
+    
+    print(f"At Rollout step {rollout_id}, There are {solvable_with_n}/{len(data_source.full_samples)} solved in {args.dynamic_dataset_n} rollouts")
+    
+    return passtimes_map
+
+
+def dynamic_dataset_evaluation(
+    args: Namespace, 
+    rollout_id: int, 
+    data_source: Any
+) -> Dict[str, int]:
+    return run(dynamic_dataset_rollout(args, rollout_id, data_source))

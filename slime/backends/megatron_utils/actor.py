@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import socket
+import gc
 from argparse import Namespace
 from contextlib import nullcontext
 
@@ -159,10 +160,15 @@ class MegatronTrainRayActor(TrainRayActor):
         clear_memory(clear_host_memory=True)
         print_memory("before offload model")
         destroy_process_groups()
-
+        
+        # print("*"*100, "here")
+        
         torch_memory_saver.pause()
 
         print_memory("after offload model")
+        
+    def barrier(self):
+        torch.distributed.barrier()
 
     @timer
     def wake_up(self) -> None:

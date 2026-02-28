@@ -3,10 +3,12 @@ import os
 import sys
 sys.path.append(os.getcwd())
 
+import gc
 from slime.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from slime.utils.arguments import parse_args
 from slime.utils.logging_utils import configure_logger, init_tracking
 from slime.utils.misc import should_run_periodic_action
+import torch
 
 
 def train(args):
@@ -67,13 +69,15 @@ def train(args):
     # note that for async training, one can change the position of the sync operation(ray.get).
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         if args.eval_interval is not None and rollout_id == 0 and not args.skip_eval_before_train:
-            ray.get(rollout_manager.eval.remote(rollout_id))
+            # ray.get(rollout_manager.eval.remote(rollout_id))
+            ray.get(rollout_manager.evaluate_dataset.remote(rollout_id))
 
         rollout_data_ref = ray.get(rollout_manager.generate.remote(rollout_id))
 
         if args.offload_rollout:
             ray.get(rollout_manager.offload.remote())
-
+            
+        # gc.disable()
         if args.use_critic:
             critic_train_handle = critic_model.async_train(rollout_id, rollout_data_ref)
             if rollout_id >= args.num_critic_only_steps:
@@ -84,16 +88,20 @@ def train(args):
 
         if should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout):
             save(rollout_id)
-
+            # actor_model.barrier()
+            
         offload_train()
         if args.offload_rollout:
             ray.get(rollout_manager.onload_weights.remote())
+            
+        # gc.enable()
         actor_model.update_weights()
         if args.offload_rollout:
             ray.get(rollout_manager.onload_kv.remote())
 
         if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
-            ray.get(rollout_manager.eval.remote(rollout_id))
+            # ray.get(rollout_manager.eval.remote(rollout_id))
+            ray.get(rollout_manager.evaluate_dataset.remote(rollout_id))
 
     ray.get(rollout_manager.dispose.remote())
 

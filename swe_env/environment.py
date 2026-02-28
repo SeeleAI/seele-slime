@@ -10,6 +10,7 @@ import asyncio
 import base64
 import functools
 import shlex
+import json
 
 # def swap_context(summarize: dict, messages: list[dict], user_request: str) -> list[dict]:
 #     assert messages[0]['role'] == "system", f"Message[0] role {messages[0]['role']} is incorrect, should be system"
@@ -153,37 +154,74 @@ Handoff Form From The Last Agent:
     ]
     return new_conversation
 
-def generate_patch(container):
-    print("Generating patch...")
+def generate_patch(container, files):
+    """
+    Generates a patch for the specific list of files provided by the agent.
+    """
+    print(f"Generating patch for files\n{files}")
+    
+    if not files:
+        print("Error: No files specified for submission.")
+        return None
+
+    # 1. Safety Check: Filter forbidden files immediately
+    # Even though the agent *should* know better, we enforce it here.
+    # forbidden_patterns = [
+    #     "reproduce", "test_", "_test.py", "setup_env", 
+    #     "install", ".pyc", "__pycache__", "wandb", ".git"
+    # ]
+    
+    # rejected_files = [f for f in files if any(pat in f for pat in forbidden_patterns)]
+    # if rejected_files:
+    #     print(
+    #         f"SUBMISSION REJECTED: You are trying to submit forbidden files: {rejected_files}. "
+    #         "Please remove these from your submission list and try again."
+    #     )
+    #     return None
+
+    # 2. Construct the Git Command Chain
+    # We join files with spaces, ensuring they are quoted in case of spaces in filenames
+    files_args = " ".join(f'"{f}"' for f in files)
+    
     cmd_list = [
         'cd /testbed',
-        "git add -A",
-        "git diff --cached > /testbed/model.patch",
+        'git reset',                 # CRITICAL: Unstage everything first to clear previous states
+        f'git add {files_args}',     # Stage ONLY the explicit files
+        'git diff --cached > /testbed/model.patch', # Diff what we just staged
         'cat /testbed/model.patch'
     ]
+
+    # 3. Execution Loop
     for command in cmd_list:
         try:
             # Encode command to avoid shell escaping issues
             b64_cmd = base64.b64encode(command.encode('utf-8')).decode('utf-8')
-            safe_cmd = f"bash -c 'timeout -k 5 40s bash -c \"echo {b64_cmd} | base64 -d | bash\"'"
             
-            # Blocking call (no signal logic here)
+            # Use a slightly longer timeout for git add if the list is long
+            timeout = "60s" if "git add" in command else "40s"
+            safe_cmd = f"bash -c 'timeout -k 5 {timeout} bash -c \"echo {b64_cmd} | base64 -d | bash\"'"
+            
+            # Blocking call
             exit_code, output = container.exec_run(cmd=safe_cmd)
-            
-            # Decode output
             output_str = output.decode("utf-8", errors="replace")
-            # print(f"\n[Tool Execution Completed] {command}")
+
             if exit_code != 0:
-                print(f"Error generating patch: {output_str}")   
-                break
+                # Provide specific error messages for file not found
+                if "did not match any files" in output_str:
+                    print(f"Error: One or more files in your list do not exist: {output_str}")
+                    return None
+                print(f"Error executing command '{command}': {output_str}")   
+                return None
                 
-            if command == cmd_list[-1]:
-                # print(f"Patch:\n{output_str}")
-                return output_str if output_str.strip() else None
+            if command == cmd_list[-1]: # The 'cat' command
+                if not output_str.strip():
+                    print("Error: The generated patch is empty. Verify that you actually modified the files you listed.")
+                return output_str
             
         except Exception as e:
             print(f"Error executing command: {str(e)}")
-            break
+            return None
+            
     return None
 
 async def run_blocking(func, *args, **kwargs):
@@ -362,7 +400,9 @@ class SWEEnv:
                 self._append_user_message(formatted_obs)
             
             elif name == "SubmitTool":
-                task_status = asyncio.run(self._verify_task(self.task_instance, self.run_id))
+                files = args.get("files")
+                files = json.loads(files)
+                task_status = asyncio.run(self._verify_task(files, self.task_instance, self.run_id))
                 task_success = task_status["success"]
                 return StepResult(
                     updated_message=self.history,
@@ -389,15 +429,16 @@ class SWEEnv:
         
     async def _verify_task(
         self,
+        files:list[str],
         task_instance: dict, 
-        run_id: str, 
+        run_id: str,
         model_name: str = "Qwen3-Coder"
     ) -> dict:
         """
         Parses model output, extracts a patch, and runs evaluation.
         """
         print(f"Evaluating {run_id}")
-        patch = generate_patch(self.container)
+        patch = generate_patch(self.container, files)
         if patch:
             # 3. Construct Payload
             prediction = {
@@ -465,7 +506,7 @@ class SWEEnv:
         try:
             self.container.reload()  # 检查容器是否存在
             self.container.stop()
-            self.container.remove()
+            self.container.remove(force=True)
             print("Container stopped and removed.")
         except Exception as e:
             # 容器可能已被 run_evaluation 清理

@@ -14,6 +14,10 @@ class RolloutFnTrainOutput:
 class RolloutFnEvalOutput:
     data: dict[str, dict[str, Any]]
     metrics: dict[str, Any] = None
+    
+@dataclass
+class RolloutFnDyDatasetOutput:
+    difficulty_maps: dict[str: int] = None
 
 
 def call_rollout_fn(fn, *args, evaluation: bool, **kwargs):

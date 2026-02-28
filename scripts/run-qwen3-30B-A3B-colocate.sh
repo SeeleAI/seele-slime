@@ -32,14 +32,15 @@ CKPT_ARGS=(
    --hf-checkpoint /root/agent_ckpt/Qwen3-Coder-30B-A3B-Instruct/
    #--hf-checkpoint /root/Qwen3-30B-A3B-FP8
    --ref-load /root/agent_ckpt/Qwen3_torch_dist
-   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_100turn_64bs_handover_hit-bug-fix/
-   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_100turn_64bs_handover_hit-big-fix/
-   --save-interval 70
+   --load /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_100turn_64bs_handover_hit-new-driver-test/
+   --save /root/agent_ckpt/Qwen3-30B-A3B_swe_env_12k_select_bias_fix_100turn_64bs_handover_hit-new-driver-test/
+   --save-interval 300
 )
 
 ROLLOUT_ARGS=(
    --rollout-function-path swe_env.gym_rollout.generate_rollout
    # --rollout-function-path gym_rollout.generate_rollout
+   # --save-debug-rollout-data debug_rollout
    # --save-debug-rollout-data debug_rollout
    # --load-debug-rollout-data debug_rollout
    --train-complete-traj
@@ -47,7 +48,8 @@ ROLLOUT_ARGS=(
    --filter-zero-advantage
    --max-turns 100  # danger
    # --prompt-data /root/seele-agent/agent_gym_data.jsonl
-   --prompt-data /root/seele-slime/swe_gym_data_evaluted_8r_12k_50turn.jsonl
+   # --prompt-data /root/seele-slime/swe_gym_data_evaluted_8r_12k_50turn.jsonl
+   --prompt-data /root/seele-slime/swe_gym_data_2_6.jsonl
    --input-key prompt
    --label-key label
    --apply-chat-template
@@ -57,14 +59,17 @@ ROLLOUT_ARGS=(
    --rollout-batch-size 32  # this one is useless
    --n-samples-per-prompt 16
    --rollout-max-response-len 12000
-   --rollout-temperature 0.9
+   --rollout-temperature 0.99
    --use-tis
    --global-batch-size 512
    # --balance-data
 )
 
 EVAL_ARGS=(
-   # --eval-interval 20
+   --eval-interval 15
+   --dynamic-dataset-concurrency 256
+   --dynamic-dataset-n 8
+   --dynamic-datarollout-path swe_env.gym_rollout.dynamic_dataset_evaluation
    # --eval-prompt-data aime /root/aime-2024/aime-2024.jsonl
    # --n-samples-per-eval-prompt 16
    # --eval-max-response-len 16384

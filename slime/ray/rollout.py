@@ -764,7 +764,6 @@ def _log_wandb_swap_data(rollout_id: int, swap_infos: list, sampled_trajectory: 
     except Exception as e:
         logger.warning(f"Failed to log W&B swap data: {e}")
 
-
 def _log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_time):
     if args.custom_rollout_log_function_path is not None:
         custom_log_func = load_function(args.custom_rollout_log_function_path)

@@ -22,6 +22,7 @@ from slime.ray.rollout import _start_router, init_rollout_engines, _log_rollout_
 
 from rollout_buffer import GymRolloutDataSource
 from slime.utils.seqlen_balancing import get_seqlen_balanced_partitions
+from slime.utils import logging_utils
 
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
@@ -50,6 +51,7 @@ class RolloutManager:
 
         self.generate_rollout = load_function(self.args.rollout_function_path)
         self.eval_generate_rollout = load_function(self.args.eval_function_path)
+        self.dynamic_dataset_rollout = load_function(self.args.dynamic_datarollout_path)
         self.custom_reward_post_process_func = None
         if self.args.custom_reward_post_process_path is not None:
             self.custom_reward_post_process_func = load_function(self.args.custom_reward_post_process_path)
@@ -143,6 +145,25 @@ class RolloutManager:
         metrics = _log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
+            
+    def evaluate_dataset(self, rollout_id):
+        """
+        Inside this function, we mimic the eval function above, 
+        but we evaluate the whole dataset
+        
+        We should add a full_dataset option in self.data_source
+        """
+        if self.args.debug_train_only:
+            return
+        
+        self.health_monitoring_resume()
+        
+        result = self.dynamic_dataset_rollout(self.args, rollout_id, self.data_source)
+        self.data_source.select_dataset(result, keep_min=1, keep_max=6)
+        
+        num_solvables = sum([1 for raw in result.values() if raw > 0])
+        
+        _log_dynamic_dataset_metrics(rollout_id, self.args, num_solvables, len(result.keys()))
 
     def save(self, rollout_id):
         self.data_source.save(rollout_id)
@@ -440,3 +461,13 @@ class RolloutManager:
                 rollout_data["dynamic_global_batch_size"] = self._dynamic_global_batch_size
             rollout_data_refs.append(Box(ray.put(rollout_data)))
         return rollout_data_refs
+
+
+def _log_dynamic_dataset_metrics(rollout_id, args, num_solvables, total_size):
+    log_dict = {"dynamic_dataset/num_solvables": num_solvables}
+    solve_rate = num_solvables / total_size
+    log_dict["dynamic_dataset/solve_rate"] = solve_rate
+    
+    log_dict["dynamic_dataset/step"] = rollout_id
+    
+    logging_utils.log(args, log_dict, step_key="dynamic_dataset/step")
